@@ -8,3 +8,12 @@ coverage/
 .vercel/
 .worktrees/
 .superpowers/
+
+# playwright
+playwright-report/
+test-results/
+.env.test
+
+# typescript (generated)
+next-env.d.ts
+*.tsbuildinfo
