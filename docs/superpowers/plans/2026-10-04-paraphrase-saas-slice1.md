@@ -4,9 +4,9 @@
 
 **Goal:** Ship a public paraphrasing web app with Auth.js sign-in, OpenRouter-streamed rewrites in 6 tones × 3 strengths, and a hard free tier of 10 requests/day/user.
 
-**Architecture:** Lean Next.js 15 (App Router) monolith on Vercel; Neon Postgres via Drizzle; all OpenRouter calls inside route handlers behind a `paraphraseProvider` seam; quota enforced by a `quotaService` seam whose single consumption trigger is the first upstream text delta.
+**Architecture:** Lean Next.js 16 (App Router) monolith on Vercel; Neon Postgres via Drizzle; all OpenRouter calls inside route handlers behind a `paraphraseProvider` seam; quota enforced by a `quotaService` seam whose single consumption trigger is the first upstream text delta.
 
-**Tech Stack:** Next.js 15 + React 19 + TypeScript, Tailwind CSS v4, Auth.js v5 (Google + credentials), Drizzle ORM + `@neondatabase/serverless`, `openai` SDK (OpenRouter baseURL), Vitest, Playwright, GitHub Actions.
+**Tech Stack:** Next.js 16 + React 19 + TypeScript, Tailwind CSS v4, Auth.js v5 (Google + credentials), Drizzle ORM + `@neondatabase/serverless`, `openai` SDK (OpenRouter baseURL), Vitest, Playwright, GitHub Actions. Implementers MUST consult `node_modules/next/dist/docs/` before writing Next code (repo AGENTS.md: Next 16 carries breaking changes vs older conventions; no `next lint`, generated route types — run `npx next typegen` before bare `tsc --noEmit`).
 
 **Spec:** `docs/superpowers/specs/2026-10-04-paraphrase-saas-slice1-design.md`
 
