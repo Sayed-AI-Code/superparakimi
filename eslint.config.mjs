@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Flat config does not read .gitignore, so listing it here is the only
+    // thing that keeps a linked git worktree — and the bundled build output
+    // inside it — from being linted as this project's source.
+    ".worktrees/**",
   ]),
 ]);
 
