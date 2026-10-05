@@ -34,11 +34,13 @@ const UNSPECIFIED = 'Something went wrong. Please try again.';
 const inputSchema = z.object({
   userId: z.uuid(),
   next: z.string().min(8, { error: PASSWORD_TOO_WEAK }),
-  // Empty and whitespace are legitimate here: a NULL-hash (Google-only)
-  // account has no current password to send, and that first-set is a required
-  // path. Accounts that DO have a hash are refused further down, where there
-  // is actually something to compare against.
-  current: z.string().max(512),
+  // No floor on purpose: a NULL-hash (Google-only) account has no current
+  // password to send, and that first-set is a required path. Accounts that DO
+  // have a hash are refused further down, where there is a hash to compare
+  // against. No max either, so this matches signUpWithEmail — both entry
+  // points let bcrypt truncate at 72 bytes rather than one capping at 512
+  // and the other not (flagged in the task report).
+  current: z.string(),
 });
 
 export async function setPassword(

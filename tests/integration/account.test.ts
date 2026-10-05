@@ -125,18 +125,17 @@ describe('setPassword — change password on an account that has a hash', () => 
     expect(text).not.toMatch(/\$2[aby]\$/);
   });
 
-  it('persists a well-formed bcrypt digest that is not derived from the plaintext visibly', async () => {
-    // Pins the shape of what actually lands in password_hash: a cost-12
-    // bcrypt digest, 60 chars, with no visible copy of the password inside
-    // it. ASCII so the expected length is exact — bcryptjs counts cost and
-    // salt in the prefix and the digest is fixed-size.
-    const ascii = 'PlainAscii99';
-    expect(await setPassword(owner.id, { current: PASSWORD, next: ascii })).toEqual({ ok: true });
+  it('persists a 60-character bcrypt digest, not the password, for the new one', async () => {
+    // Pins the shape of what lands in password_hash: bcrypt's fixed 60-char
+    // format at cost 12, with no recoverable copy of the password in it.
+    const next = 'PlainAscii99';
+    expect(await setPassword(owner.id, { current: PASSWORD, next })).toEqual({ ok: true });
 
     const stored = await hashOf(owner.id);
-    expect(stored).toMatch(/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/);
-    expect(stored).not.toContain(ascii);
-    expect(await verifyPassword(ascii, stored)).toBe(true);
+    expect(stored).toMatch(/^\$2[aby]\$12\$[./A-Za-z0-9]{53}$/);
+    expect(stored).toHaveLength(60);
+    expect(stored).not.toContain(next);
+    expect(await verifyPassword(next, stored)).toBe(true);
   });
 });
 
@@ -224,14 +223,33 @@ describe('setPassword — the action, not the page, is the authorization boundar
     expect(await hashOf(owner.id)).toBe(ownerHash);
   });
 
-  it('rejects a malformed userId before touching the database, and does not 500', async () => {
-    // A malformed uuid makes Postgres throw 22P02; the action must translate
-    // that into a {error} result rather than an unhandled rejection.
+  it('rejects a malformed userId claim without ever reaching the database', async () => {
+    // The session-vs-claim comparison is what stops this: 'not-a-uuid' can
+    // never equal a real session id, so the query is never built and
+    // Postgres' 22P02 is never reached. Pinned so a future "just pass the
+    // id through" refactor cannot quietly move this check after the query.
+    mockedAuth.mockResolvedValue({ user: { id: owner.id, email: OWNER_EMAIL } } as never);
+
     const result = await setPassword('not-a-uuid', {
       current: PASSWORD,
       next: NEW_PASSWORD,
     });
 
-    expect(result).toEqual({ error: expect.any(String) });
+    expect(result).toEqual({ error: 'Not signed in.' });
+    expect(await hashOf(owner.id)).toBe(ownerHash);
+  });
+
+  it('refuses a session whose user row no longer exists, without leaking the read failure', async () => {
+    // Signed-in token outliving the row: the read succeeds and returns no
+    // row, which must be a refusal rather than an unhandled rejection or a
+    // blind write.
+    const gone = await makeUser('gone@example.com', ownerHash);
+    signInAs(gone);
+    const db = await getDb();
+    await db.delete(users).where(eq(users.id, gone.id));
+
+    expect(
+      await setPassword(gone.id, { current: PASSWORD, next: NEW_PASSWORD }),
+    ).toEqual({ error: 'Not signed in.' });
   });
 });
