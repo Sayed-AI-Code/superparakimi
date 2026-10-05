@@ -28,7 +28,36 @@ const signUpInputSchema = z.object({
 
 export type SignUpResult = { ok: true } | { error: string };
 
-const EMAIL_TAKEN = 'Email already registered';
+export const EMAIL_TAKEN = 'Email already registered';
+const INVALID_INPUT = 'Invalid input';
+
+// Rendered by the signup page's own catch, so it belongs to this allowlist too.
+export const GENERIC_SIGNUP_ERROR = 'Something went wrong. Please try again.';
+
+/**
+ * EVERY string signUpWithEmail can hand back, in one exported allowlist.
+ *
+ * The page puts these in `?error=` and reads them back off the URL. Rendering
+ * whatever arrives would let `/signup?error=<anything>` print attacker-chosen
+ * copy inside an official-looking red alert on a public, unauthenticated page —
+ * content spoofing, which React's escaping does not address because the text is
+ * legitimate-looking, not executable. Every message in the schema above is set
+ * explicitly rather than left to zod's defaults, so this list is closed and an
+ * unrecognised value means someone put it there, not that a message was added
+ * and forgotten.
+ *
+ * Cost of the allowlist: a NEW error string added to the schema must be added
+ * here too, or it degrades to the generic refusal while the action still
+ * reports it. That failure is visible and safe, which is the right trade.
+ */
+export const SIGN_UP_ERRORS: readonly string[] = [
+  'Enter a valid email address.',
+  'Password must be at least 8 characters',
+  PASSWORD_TOO_LONG,
+  INVALID_INPUT,
+  EMAIL_TAKEN,
+  GENERIC_SIGNUP_ERROR,
+];
 
 // PostgreSQL SQLSTATE for unique_violation — the index, not the pre-check, is
 // the authority on uniqueness.
@@ -40,7 +69,7 @@ export async function signUpWithEmail(input: {
 }): Promise<SignUpResult> {
   const parsed = signUpInputSchema.safeParse(input);
   if (!parsed.success) {
-    return { error: parsed.error.issues[0]?.message ?? 'Invalid input' };
+    return { error: parsed.error.issues[0]?.message ?? INVALID_INPUT };
   }
   const { email, password } = parsed.data;
 

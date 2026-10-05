@@ -1,13 +1,28 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
-import { signUpWithEmail } from '@/lib/auth/signup';
+import {
+  GENERIC_SIGNUP_ERROR,
+  SIGN_UP_ERRORS,
+  signUpWithEmail,
+} from '@/lib/auth/signup';
 import { describeErrorForLog } from '@/lib/auth/log';
 
 export default async function SignUpPage(props: PageProps<'/signup'>) {
   const params = await props.searchParams;
-  const error =
+  // Allowlisted, never raw: `error` arrives from a public URL query, so any
+  // string could be put in it. Only the messages signUpWithEmail actually
+  // produces may render in this alert; anything else degrades to the generic
+  // refusal. React escaping already rules out XSS — the hole here is content
+  // spoofing, which escaping does nothing about. Same ruling as /account?err=.
+  const rawError =
     typeof params.error === 'string' && params.error.length > 0 ? params.error : null;
+  const error =
+    rawError === null
+      ? null
+      : SIGN_UP_ERRORS.includes(rawError)
+        ? rawError
+        : GENERIC_SIGNUP_ERROR;
 
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
@@ -42,7 +57,7 @@ export default async function SignUpPage(props: PageProps<'/signup'>) {
               // SQL and params (email + bcrypt hash) in its message/stack,
               // so the raw error must not reach the log.
               console.error('[signup] signUpWithEmail failed', describeErrorForLog(error));
-              return { error: 'Something went wrong. Please try again.' };
+              return { error: GENERIC_SIGNUP_ERROR };
             });
             if ('error' in result) {
               redirect(`/signup?error=${encodeURIComponent(result.error)}`);
