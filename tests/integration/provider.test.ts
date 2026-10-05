@@ -14,6 +14,7 @@ type RecordedRequest = {
 let server: http.Server;
 let handler: (req: http.IncomingMessage, res: http.ServerResponse) => void;
 let recorded: RecordedRequest | null = null;
+let requestCount = 0;
 const originalEnv = {
   base: process.env.OPENROUTER_BASE_URL,
   key: process.env.OPENROUTER_API_KEY,
@@ -55,7 +56,9 @@ async function collect(
 
 beforeEach(async () => {
   recorded = null;
+  requestCount = 0;
   server = http.createServer((req, res) => {
+    requestCount += 1;
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
@@ -144,6 +147,21 @@ describe('OpenRouter provider — failure modes → error types', () => {
     expect(msg).not.toContain('test-key-never-asserted');
     expect(msg).not.toContain('127.0.0.1');
     expect(msg).not.toContain('openai/gpt-4o-mini');
+  });
+
+  it('issues exactly ONE upstream request per stream() call (maxRetries: 0, no silent retry)', async () => {
+    handler = (_req, res) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'boom' } }));
+    };
+    const provider = createOpenRouterProvider();
+    const { deltas, error } = await collect(
+      provider.stream('t', 'standard', 'light', new AbortController().signal),
+    );
+    expect(deltas).toHaveLength(0);
+    expect(error).toBeInstanceOf(UpstreamUnavailableError);
+    // SDK default maxRetries=2 would hit the server 3 times on a 500.
+    expect(requestCount).toBe(1);
   });
 
   it('mid-stream death: already-yielded deltas stand, then UpstreamUnavailableError', async () => {

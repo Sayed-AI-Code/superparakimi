@@ -36,7 +36,10 @@ export function createOpenRouterProvider(opts?: { timeoutMs?: number }): Paraphr
       }
       const model = process.env.PARAPHRASE_MODEL ?? DEFAULT_MODEL;
       const baseURL = process.env.OPENROUTER_BASE_URL ?? DEFAULT_BASE_URL;
-      const client = new OpenAI({ apiKey, baseURL });
+      // maxRetries: 0 — spec forbids silent upstream retry; a lost
+      // response after upstream already generated must not double-bill.
+      // Exactly one upstream request per stream() call (SDK default is 2).
+      const client = new OpenAI({ apiKey, baseURL, maxRetries: 0 });
       const timeoutSignal = AbortSignal.timeout(timeoutMs);
       const signal = AbortSignal.any([callerSignal, timeoutSignal]);
 
