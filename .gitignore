@@ -12,6 +12,9 @@ coverage/
 # playwright
 playwright-report/
 test-results/
+# development-only file-backed PGlite (see selectRuntimeBackend in db/index.ts)
+.e2e-db/
+.auth-scratch/
 .env.test
 
 # typescript (generated)

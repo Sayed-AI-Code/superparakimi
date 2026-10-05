@@ -134,3 +134,52 @@ describe('getDb backend wiring', () => {
     expect(mocks.nodeMigrateCalls).toHaveLength(2);
   });
 });
+
+describe('selectRuntimeBackend (app backend + production guard)', () => {
+  it('uses Neon whenever DATABASE_URL is present, in any environment', async () => {
+    const { selectRuntimeBackend } = await import('@/db');
+    expect(selectRuntimeBackend('production', 'postgresql://x')).toBe('neon');
+    expect(selectRuntimeBackend('development', 'postgresql://x')).toBe('neon');
+    expect(selectRuntimeBackend(undefined, 'postgresql://x')).toBe('neon');
+  });
+
+  it('allows the ephemeral PGlite backend in development only', async () => {
+    const { selectRuntimeBackend } = await import('@/db');
+    expect(selectRuntimeBackend('development', undefined)).toBe('dev-pglite');
+    expect(selectRuntimeBackend('development', '')).toBe('dev-pglite');
+  });
+
+  // The whole point of the guard: an ephemeral database that boots "successfully"
+  // in production and loses every row on the next cold start is worse than a
+  // crash at startup.
+  it('refuses to start without DATABASE_URL in production', async () => {
+    const { selectRuntimeBackend } = await import('@/db');
+    expect(() => selectRuntimeBackend('production', undefined)).toThrow(/DATABASE_URL is required/);
+    expect(() => selectRuntimeBackend('production', '')).toThrow(/ephemeral/);
+  });
+
+  it('refuses when NODE_ENV is unset, not just when it says production', async () => {
+    // An unconfigured NODE_ENV must not be treated as development.
+    const { selectRuntimeBackend } = await import('@/db');
+    expect(() => selectRuntimeBackend(undefined, undefined)).toThrow(/DATABASE_URL is required/);
+    expect(() => selectRuntimeBackend('test', undefined)).toThrow(/DATABASE_URL is required/);
+  });
+
+  it('dev-pglite migrates and never opens a pg.Pool or a Neon connection', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    delete process.env.DATABASE_URL;
+    process.env.DEV_PGLITE_DIR = '/tmp/parakimi-dev-db-test';
+    const { getDb, devPgliteDir } = await import('@/db');
+    const db = await getDb();
+    expect(mocks.pgliteBoots).toBe(1);
+    expect(mocks.pgliteDrizzleCalls).toBe(1);
+    expect(mocks.pgliteMigrateCalls).toHaveLength(1);
+    expect(mocks.pgliteMigrateCalls[0]?.migrationsFolder).toContain('drizzle');
+    expect(mocks.nodeDrizzleCalls).toBe(0);
+    expect(mocks.poolConfigs).toHaveLength(0);
+    expect(db).toBe(mocks.db);
+    expect(devPgliteDir()).toBe('/tmp/parakimi-dev-db-test');
+    vi.unstubAllEnvs();
+    delete process.env.DEV_PGLITE_DIR;
+  });
+});
