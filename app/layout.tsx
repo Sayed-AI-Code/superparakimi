@@ -3,7 +3,8 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 
-import { auth, signOut } from "@/lib/auth";
+import { auth, signOut } from '@/lib/auth';
+import UsageMeter from '@/components/UsageMeter';
 import "./globals.css";
 
 const geistSans = Geist({
@@ -37,8 +38,7 @@ async function SiteNav() {
       <div className="flex items-center gap-4 text-sm">
         {session?.user ? (
           <>
-            {/* Task 10 fills this slot with the usage meter. */}
-            <div id="usage-meter-slot" />
+            <UsageMeter />
             <span className="hidden text-zinc-600 sm:inline dark:text-zinc-400">
               {session.user.email ?? session.user.name}
             </span>
