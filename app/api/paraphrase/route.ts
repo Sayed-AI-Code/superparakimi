@@ -9,10 +9,8 @@ import {
   check,
   completeUsage,
 } from '@/lib/quota/quotaService';
-import { AUTHED_LIMIT_60S, checkRate } from '@/lib/ratelimit';
+import { apiRateLimit } from '@/lib/ratelimit';
 import { paraphraseRequestSchema } from '@/lib/validation';
-
-const RATE_WINDOW_MS = 60_000;
 
 // zod caps the TRIMMED text, so leading/trailing whitespace stays unbounded
 // until schema.parse sees it. This raw-byte ceiling bounds the body on the
@@ -26,7 +24,6 @@ const MAX_BODY_BYTES = 32_768;
 const UPSTREAM_ERROR_MESSAGE = "Service hiccup — didn't count against your limit";
 const CANCELLED_MESSAGE = 'Request cancelled.';
 const GENERIC_STREAM_MESSAGE = 'Generation stopped unexpectedly.';
-const RATE_LIMIT_MESSAGE = 'Too many requests. Please slow down.';
 const QUOTA_MESSAGE = "You've used all your free paraphrases for today.";
 
 // DURING-STREAMING only (beginUsage already created the row, so the slot is
@@ -61,18 +58,6 @@ function jsonError(
     status,
     headers: { 'content-type': 'application/json', ...headers },
   });
-}
-
-function clientIp(request: Request): string {
-  // First hop of x-forwarded-for. This is trustworthy ONLY because the
-  // deploy target is Vercel (spec §11), whose edge overwrites the inbound
-  // value; on any other host a client could forge it and make this limiter a
-  // no-op. The Web Request API exposes no peer address here, so there is no
-  // fallback — anonymous traffic has no IP to key on and shares one bucket.
-  // Anonymous per-IP limiting therefore belongs at the edge (proxy.ts), and
-  // until that exists treat this limiter as advisory. See ledger.
-  const forwarded = request.headers.get('x-forwarded-for');
-  return forwarded?.split(',')[0]?.trim() || 'unknown';
 }
 
 function isAbortLike(error: unknown): boolean {
@@ -154,6 +139,14 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
       // pinned by the spec and by existing tests.
       const correlationId = crypto.randomUUID();
 
+      // Per-IP brake, ahead of the auth gate: a limiter that runs after the
+      // 401 has nothing to limit, since anonymous callers would collect
+      // unlimited 401s for free. 10/min anonymous, 30/min authenticated.
+      // Abuse control, NOT quota — a denial here consumes no quota and writes
+      // no usage_events row.
+      const limited = apiRateLimit(request);
+      if (limited) return limited;
+
       const session = await auth();
       const userId = session?.user?.id;
       if (!userId) {
@@ -177,25 +170,6 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
         return jsonError(422, { error: 'Invalid paraphrase request' });
       }
       const { text, mode, strength } = parsed.data;
-
-      // Abuse control, NOT quota: a rate-limit denial consumes no quota and
-      // writes no usageEvents row. The session is guaranteed by the 401 gate
-      // above, so this is always the authenticated limit.
-      //
-      // NOT IMPLEMENTED TODAY: the spec's 10 req/min ANONYMOUS limit on
-      // /api/* has no enforcement point. proxy.ts matches only /app and
-      // /account, and anonymous traffic is 401'd here before it can reach any
-      // limiter. Do not read that as handled — it is owned by Task 12 (edge
-      // matcher + checkRate in proxy.ts, or Vercel WAF) and is a known
-      // deploy-readiness gap.
-      const rate = checkRate(clientIp(request), AUTHED_LIMIT_60S, RATE_WINDOW_MS);
-      if (!rate.allowed) {
-        return jsonError(
-          429,
-          { error: RATE_LIMIT_MESSAGE, retryAfterSec: rate.retryAfterSec },
-          { 'retry-after': String(rate.retryAfterSec) },
-        );
-      }
 
       const quota = await check(userId);
       if (!quota.allowed) {

@@ -25,6 +25,15 @@ import { GET } from '@/app/api/usage/route';
 const mockedAuth = vi.mocked(auth);
 const mockedCheck = vi.mocked(check);
 
+// Fresh client IP per call — this suite is about the route-level catch, not
+// the per-IP brake, and repeated calls from one simulated visitor would spend
+// that visitor's anonymous budget before the 500 assertion could run.
+function apiReq(): Request {
+  return new Request('http://localhost/api/usage', {
+    headers: { 'x-forwarded-for': `203.0.113.${crypto.randomUUID().slice(0, 7)}` },
+  });
+}
+
 // Shaped like the leak this route must never emit: a drizzle query wrapper
 // whose message, query and params all carry the email and the bcrypt hash.
 const LEAKY_EMAIL = 'victim@example.com';
@@ -59,7 +68,7 @@ describe('GET /api/usage — route-level catch (spec §7)', () => {
   it('turns a rejected check() into 500 + correlationId, never a raw throw', async () => {
     mockedCheck.mockRejectedValue(leakyDrizzleError());
 
-    const res = await GET();
+    const res = await GET(apiReq());
 
     expect(res.status).toBe(500);
     expect(res.headers.get('content-type')).toContain('application/json');
@@ -74,7 +83,7 @@ describe('GET /api/usage — route-level catch (spec §7)', () => {
   it('leaks no email, hash, query or params in the 500 body', async () => {
     mockedCheck.mockRejectedValue(leakyDrizzleError());
 
-    const text = await (await GET()).text();
+    const text = await (await GET(apiReq())).text();
 
     expect(text).not.toContain(LEAKY_EMAIL);
     expect(text).not.toContain(LEAKY_HASH);
@@ -85,7 +94,7 @@ describe('GET /api/usage — route-level catch (spec §7)', () => {
   it('logs the same correlationId the client received — the seam must join', async () => {
     mockedCheck.mockRejectedValue(leakyDrizzleError());
 
-    const body = await (await GET()).json();
+    const body = await (await GET(apiReq())).json();
 
     expect(logged()).toContain(body.correlationId as string);
   });
@@ -93,7 +102,7 @@ describe('GET /api/usage — route-level catch (spec §7)', () => {
   it('logs no credential even when the error is full of them, keeps diagnostics', async () => {
     mockedCheck.mockRejectedValue(leakyDrizzleError());
 
-    await GET();
+    await GET(apiReq());
 
     const text = logged();
     expect(text).not.toContain(LEAKY_EMAIL);
@@ -108,7 +117,7 @@ describe('GET /api/usage — route-level catch (spec §7)', () => {
     mockedCheck.mockResolvedValue({ allowed: true, used: 0, limit: 10, resetsAt: 'x' });
     mockedAuth.mockRejectedValue(new Error('adapter exploded'));
 
-    const res = await GET();
+    const res = await GET(apiReq());
 
     expect(res.status).toBe(500);
     expect(await res.json()).toHaveProperty('correlationId');
@@ -124,7 +133,7 @@ describe('GET /api/usage — route-level catch (spec §7)', () => {
       resetsAt: '2026-03-15T05:30:31.000Z',
     });
 
-    const body = await (await GET()).json();
+    const body = await (await GET(apiReq())).json();
 
     expect(body.used).toBe(11);
     expect(body.limit).toBe(10);

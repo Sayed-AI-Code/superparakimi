@@ -24,6 +24,7 @@ vi.mock('@/lib/auth', () => ({
 }));
 
 import { auth } from '@/lib/auth';
+import { ANON_LIMIT_60S } from '@/lib/ratelimit';
 import { makeRouteHandler } from '@/app/api/paraphrase/route';
 // Imported under an alias so the cross-endpoint agreement test can call the
 // usage endpoint's own handler. It shares the mocked auth() above.
@@ -46,15 +47,28 @@ async function mkUser(): Promise<string> {
 type Frame = Record<string, unknown>;
 
 /** Every request gets its own IP so the process-local rate limiter's
- * fixed windows never bleed across tests. */
+ * fixed windows never bleed across tests.
+ *
+ * The session cookie is here because the suite is signed in: `auth()` is
+ * mocked to return a user, so a request that claims to be authenticated has to
+ * carry the cookie the limiter probes to pick its bucket. Without it these
+ * callers were classified anonymous and spent the 10/min budget, which made the
+ * "30 authed requests" test below 429 at the eleventh call — the limiter
+ * working correctly against a fixture that was lying about who it was.
+ * Pass `anonymous: true` to test the anonymous bucket from this route. */
 function fakeReq(
   body: unknown,
-  opts: { ip?: string; signal?: AbortSignal } = {},
+  opts: { ip?: string; signal?: AbortSignal; anonymous?: boolean } = {},
 ): Request {
   const ip = opts.ip ?? `10.44.${(ipSeq >> 8) & 255}.${++ipSeq & 255}`;
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-forwarded-for': ip,
+  };
+  if (!opts.anonymous) headers.cookie = 'authjs.session-token=test-session';
   return new Request('http://localhost/api/paraphrase', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-for': ip },
+    headers,
     body: typeof body === 'string' ? body : JSON.stringify(body),
     signal: opts.signal,
   });
@@ -260,6 +274,31 @@ describe('POST /api/paraphrase — rate limiting is not quota', () => {
     const body = (await limited.json()) as Record<string, unknown>;
     expect(body).toEqual({ error: expect.any(String), retryAfterSec: expect.any(Number) });
     expect(await rowsFor(userId)).toHaveLength(0);
+    expect((await check(userId)).used).toBe(0);
+  });
+
+  // The anonymous half of the same rule, on this route: the brake runs ahead
+  // of the 401 gate, so an anonymous caller cannot farm free 401s forever.
+  it('429 from the anonymous budget at 10/min, before the 401 gate', async () => {
+    const ip = '198.51.100.90';
+    const route = makeRouteHandler({
+      provider: {
+        stream: async function* () {
+          throw new UpstreamUnavailableError('upstream down');
+        },
+      } as ParaphraseProvider,
+    });
+
+    // No cookie, so the limiter sees an anonymous caller; auth() is still
+    // mocked to a session, which is the point — the limiter decides on the
+    // cookie alone and never waits for the JWT check.
+    for (let i = 0; i < ANON_LIMIT_60S; i++) {
+      expect((await route.POST(fakeReq(PAYLOAD, { ip, anonymous: true }))).status).toBe(502);
+    }
+
+    const blocked = await route.POST(fakeReq(PAYLOAD, { ip, anonymous: true }));
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get('retry-after')).not.toBeNull();
     expect((await check(userId)).used).toBe(0);
   });
 
@@ -591,7 +630,11 @@ describe('remaining is clamped identically at both derivation sites', () => {
     // The load-bearing assertion: the two endpoints must not contradict each
     // other. Pinning only the SSE frame would let the endpoint drift, and
     // vice versa.
-    const usage = (await usageGet()) as Response;
+    const usage = (await usageGet(
+      new Request('http://localhost/api/usage', {
+        headers: { 'x-forwarded-for': `203.0.113.${crypto.randomUUID().slice(0, 7)}` },
+      }),
+    )) as Response;
     expect(usage.status).toBe(200);
     const body = (await usage.json()) as {
       used: number;

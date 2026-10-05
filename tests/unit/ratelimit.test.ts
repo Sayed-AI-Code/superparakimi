@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ANON_LIMIT_60S,
   AUTHED_LIMIT_60S,
+  RATE_LIMIT_MESSAGE,
+  apiRateLimit,
   checkRate,
+  clientIp,
+  rateLimitDecision,
 } from '@/lib/ratelimit';
 
 const WINDOW_60S = 60_000;
@@ -92,5 +96,93 @@ describe('checkRate: key isolation', () => {
     const res = checkRate(untouched, ANON_LIMIT_60S, WINDOW_60S);
     expect(res.allowed).toBe(true);
     expect(res.retryAfterSec).toBe(0);
+  });
+});
+
+function headers(init: Record<string, string> = {}) {
+  return new Headers(init);
+}
+
+describe('rateLimitDecision (route-level classification)', () => {
+  it('classifies by session cookie, not by path', () => {
+    expect(rateLimitDecision(headers({ cookie: 'authjs.session-token=abc' })).limit).toBe(
+      AUTHED_LIMIT_60S,
+    );
+    expect(
+      rateLimitDecision(headers({ cookie: '__Host-authjs.session-token=abc' })).limit,
+    ).toBe(AUTHED_LIMIT_60S);
+    expect(rateLimitDecision(headers()).limit).toBe(ANON_LIMIT_60S);
+    expect(rateLimitDecision(headers({ cookie: 'other=1' })).limit).toBe(
+      ANON_LIMIT_60S,
+    );
+  });
+
+  it('blocks an anonymous caller at the 11th hit of the window', () => {
+    const ip = `198.51.100.${crypto.randomUUID().slice(0, 2)}`;
+    const h = headers({ 'x-forwarded-for': ip });
+    for (let i = 0; i < ANON_LIMIT_60S; i++) {
+      expect(rateLimitDecision(h).allowed).toBe(true);
+    }
+    const blocked = rateLimitDecision(h);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterSec).toBeGreaterThan(0);
+    expect(blocked.limit).toBe(ANON_LIMIT_60S);
+  });
+
+  it('anonymous exhaustion does not throttle an authenticated caller on the same IP', () => {
+    const ip = `203.0.113.${crypto.randomUUID().slice(0, 2)}`;
+    for (let i = 0; i < ANON_LIMIT_60S + 5; i++) {
+      rateLimitDecision(headers({ 'x-forwarded-for': ip }));
+    }
+    const authed = rateLimitDecision(
+      headers({ 'x-forwarded-for': ip, cookie: 'authjs.session-token=abc' }),
+    );
+    expect(authed.allowed).toBe(true);
+  });
+
+  it('clientIp takes the first forwarded hop', () => {
+    expect(clientIp({ headers: headers({ 'x-forwarded-for': '203.0.113.7, 70.41.3.18' }) })).toBe(
+      '203.0.113.7',
+    );
+    expect(clientIp({ headers: headers({ 'x-forwarded-for': ' 203.0.113.8 ,10.0.0.1' }) })).toBe(
+      '203.0.113.8',
+    );
+    expect(clientIp({ headers: headers() })).toBe('unknown');
+  });
+});
+
+describe('apiRateLimit (the 429 the routes hand back)', () => {
+  it('returns null while the caller is inside the budget', () => {
+    const ip = `203.0.113.${crypto.randomUUID().slice(0, 2)}`;
+    const request = { headers: headers({ 'x-forwarded-for': ip }) };
+    expect(apiRateLimit(request)).toBeNull();
+  });
+
+  it('answers 429 with JSON, the pinned copy, and retry-after once exhausted', async () => {
+    const ip = `198.51.100.${crypto.randomUUID().slice(0, 2)}`;
+    const request = { headers: headers({ 'x-forwarded-for': ip }) };
+    for (let i = 0; i < ANON_LIMIT_60S; i++) {
+      expect(apiRateLimit(request)).toBeNull();
+    }
+    const blocked = apiRateLimit(request);
+    expect(blocked).not.toBeNull();
+    expect(blocked!.status).toBe(429);
+    expect(blocked!.headers.get('content-type')).toBe('application/json');
+    expect(Number(blocked!.headers.get('retry-after'))).toBeGreaterThan(0);
+    await expect(blocked!.json()).resolves.toEqual({
+      error: RATE_LIMIT_MESSAGE,
+      retryAfterSec: expect.any(Number),
+    });
+  });
+
+  it('lets an authenticated caller through an exhausted anonymous bucket', () => {
+    const ip = `203.0.113.${crypto.randomUUID().slice(0, 2)}`;
+    for (let i = 0; i < ANON_LIMIT_60S + 3; i++) {
+      apiRateLimit({ headers: headers({ 'x-forwarded-for': ip }) });
+    }
+    const authed = apiRateLimit(
+      { headers: headers({ 'x-forwarded-for': ip, cookie: 'authjs.session-token=abc' }) },
+    );
+    expect(authed).toBeNull();
   });
 });

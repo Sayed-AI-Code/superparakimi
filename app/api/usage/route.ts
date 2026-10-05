@@ -1,5 +1,6 @@
 import { auth } from '@/lib/auth';
 import { describeErrorForLog } from '@/lib/auth/log';
+import { apiRateLimit } from '@/lib/ratelimit';
 import { check } from '@/lib/quota/quotaService';
 
 /**
@@ -23,7 +24,13 @@ import { check } from '@/lib/quota/quotaService';
  * solely by POST /api/paraphrase at its first non-empty delta, so polling
  * this endpoint cannot spend a user's day.
  */
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
+  // Ahead of the 401 gate on purpose: anonymous callers are exactly who this
+  // brake exists for, and a limiter behind the auth check would only ever see
+  // signed-in traffic.
+  const limited = apiRateLimit(request);
+  if (limited) return limited;
+
   // One id per request, generated before anything that can throw, so the
   // `console.error` below and the body handed to the client carry the same
   // value. Without it a visitor reporting "it broke at 14:02" cannot be joined
