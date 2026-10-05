@@ -281,7 +281,11 @@ export default function Workspace() {
       <h1 className="text-2xl font-semibold tracking-tight text-black dark:text-zinc-50">
         Paraphrase
       </h1>
-      <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+      <p
+        id="usage-summary"
+        role="status"
+        className="mt-1 text-sm text-zinc-600 dark:text-zinc-400"
+      >
         {/* Before the mount fetch resolves there is no true remaining count, so
             this states the plan's constant allowance — a published fact about the
             plan, not an invented count for this visitor, who may have 0 left. */}
