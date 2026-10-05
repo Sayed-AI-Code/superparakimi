@@ -21,3 +21,14 @@ test-results/
 next-env.d.ts
 *.tsbuildinfo
 .vitest/
+
+# vercel CLI project linkage
+.vercel
+# Written by the Neon marketplace integration when the store was provisioned.
+# Vendor-owned and regenerable; kept out of the repo.
+.agents/
+.claude/
+skills-lock.json
+
+# macOS
+.DS_Store
