@@ -4,14 +4,14 @@ import { z } from 'zod';
 import { getDb, users } from '@/db';
 import {
   MAX_PASSWORD_BYTES,
+  PASSWORD_TOO_LONG,
   hashPassword,
   passwordByteLength,
 } from '@/lib/auth/passwords';
 
 // Pure server module (no 'use server' directive) so it stays unit-testable;
-// pages wrap it in inline server actions.
-const PASSWORD_TOO_LONG = `Password must be ${MAX_PASSWORD_BYTES} bytes or shorter.`;
-
+// pages wrap it in inline server actions. PASSWORD_TOO_LONG comes from
+// lib/auth/passwords.ts so both creation boundaries emit identical copy.
 const signUpInputSchema = z.object({
   email: z.email({ error: 'Enter a valid email address.' }).trim().toLowerCase(),
   password: z

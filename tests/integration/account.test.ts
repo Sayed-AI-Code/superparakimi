@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { getDb, resetTestDb, users } from '@/db';
 import {
   MAX_PASSWORD_BYTES,
+  PASSWORD_TOO_LONG,
   hashPassword,
   passwordByteLength,
   verifyPassword,
@@ -21,7 +22,7 @@ vi.mock('@/lib/auth', () => ({
 }));
 
 import { auth } from '@/lib/auth';
-import { setPassword, PASSWORD_TOO_LONG } from '@/lib/account/actions';
+import { setPassword } from '@/lib/account/actions';
 
 const mockedAuth = vi.mocked(auth);
 

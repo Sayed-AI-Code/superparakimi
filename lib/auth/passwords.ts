@@ -25,6 +25,13 @@ export const BCRYPT_COST = 12;
  */
 export const MAX_PASSWORD_BYTES = 72;
 
+/**
+ * One copy for both creation boundaries (`signUpWithEmail` and
+ * `setPassword.next`). Duplicated, the two would drift and the same mistake
+ * would read differently depending on which form caught it.
+ */
+export const PASSWORD_TOO_LONG = `Password must be ${MAX_PASSWORD_BYTES} bytes or shorter.`;
+
 /** Byte length as bcrypt sees it — NOT `String.prototype.length`. */
 export function passwordByteLength(password: string): number {
   return new TextEncoder().encode(password).length;

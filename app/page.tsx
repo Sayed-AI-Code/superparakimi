@@ -6,8 +6,11 @@ import { FREE_DAILY_LIMIT } from '@/lib/quota/limit';
 
 export const metadata: Metadata = {
   title: 'superparakimi — paraphrase with control over mode and strength',
-  description:
-    'Rewrite text in six modes and three intensities, streamed back live. Free plan: 10 paraphrases a day.',
+  // Built from the same constants the body and the engine use. The meta
+  // description is the most syndicated string on the site — hardcoding "six"
+  // or "10" here would let the advertised numbers drift from the enforced ones
+  // while every rendered-body test stayed green.
+  description: `Rewrite text in ${MODES.length} modes and ${STRENGTHS.length} intensities, streamed back live. Free plan: ${FREE_DAILY_LIMIT} paraphrases a day.`,
 };
 
 // One line per mode, from the same MODES array that drives the workspace

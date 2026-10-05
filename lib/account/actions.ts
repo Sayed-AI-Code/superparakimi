@@ -6,6 +6,7 @@ import { auth } from '@/lib/auth';
 import { describeErrorForLog } from '@/lib/auth/log';
 import {
   MAX_PASSWORD_BYTES,
+  PASSWORD_TOO_LONG,
   hashPassword,
   passwordByteLength,
   verifyPassword,
@@ -27,7 +28,6 @@ import {
 export type SetPasswordResult = { ok: true } | { error: string };
 
 export const PASSWORD_TOO_WEAK = 'Password must be at least 8 characters';
-export const PASSWORD_TOO_LONG = `Password must be ${MAX_PASSWORD_BYTES} bytes or shorter.`;
 
 // Copy is spec'd for the weak-password case; the rest are ours and stay
 // deliberately vague off-origin. None of these ever carry a hash, a password,
@@ -35,7 +35,26 @@ export const PASSWORD_TOO_LONG = `Password must be ${MAX_PASSWORD_BYTES} bytes o
 const NOT_SIGNED_IN = 'Not signed in.';
 const ENTER_CURRENT = 'Enter your current password.';
 const WRONG_CURRENT = 'Current password is incorrect.';
-const UNSPECIFIED = 'Something went wrong. Please try again.';
+/** Exported so the account page's fallback is this same string, not a copy. */
+export const UNSPECIFIED = 'Something went wrong. Please try again.';
+
+/**
+ * The complete set of messages this action can emit, exported so the account
+ * page can render ONLY these. The page takes `?err=` off a URL, and an
+ * attacker-crafted `/account?err=Your%20password%20expires%20today` would
+ * otherwise print attacker-chosen copy inside an official-looking alert above
+ * a live password field — same-origin content spoofing, React escaping
+ * notwithstanding. Anything unrecognised degrades to a generic string, so the
+ * default is safe when a new message is added here and forgotten there.
+ */
+export const SET_PASSWORD_ERRORS: readonly string[] = [
+  PASSWORD_TOO_WEAK,
+  PASSWORD_TOO_LONG,
+  NOT_SIGNED_IN,
+  ENTER_CURRENT,
+  WRONG_CURRENT,
+  UNSPECIFIED,
+];
 
 const inputSchema = z.object({
   userId: z.uuid(),
@@ -111,7 +130,14 @@ export async function setPassword(
   // An account with a hash must prove it: a missing or wrong `current` is a
   // refusal, never a silent overwrite. A NULL hash means there is nothing to
   // prove against — first-set, so `current` is ignored entirely.
-  if (storedHash !== null) {
+  // Truthy, not `!== null`: the declared type is `string | null`, but a
+  // driver surfacing SQL NULL as `undefined` would otherwise take the verify
+  // branch and hand `undefined` to bcrypt.compare, which throws "invalid salt"
+  // from OUTSIDE the try below — an unhandled rejection and a 500 instead of a
+  // clean first-set. Both absent-values mean "no hash to prove against", and
+  // the write below targets session.user.id, so a mis-read cannot reach
+  // another account.
+  if (storedHash) {
     if (current.trim().length === 0) return { error: ENTER_CURRENT };
     if (!(await verifyPassword(current, storedHash))) {
       return { error: WRONG_CURRENT };

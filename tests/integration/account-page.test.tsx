@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 
 import { accounts, getDb, resetTestDb, users } from '@/db';
+import { SET_PASSWORD_ERRORS, UNSPECIFIED } from '@/lib/account/actions';
 import { hashPassword } from '@/lib/auth/passwords';
 
 // vitest.config.ts does not set globals: true, so testing-library's automatic
@@ -158,5 +159,41 @@ describe('/account page', () => {
     );
 
     expect(screen.getByRole('alert').textContent).toBe('Current password is incorrect.');
+  });
+
+  it('refuses to render attacker-chosen ?err= copy (content spoofing, not XSS)', async () => {
+    // React escaping rules out script execution here, but that is not the
+    // defect. The defect is that ANY text an attacker puts in the URL would
+    // appear inside an official-looking role="alert" bubble directly above a
+    // live password field — which reads as an instruction from us.
+    const user = await makeUser('spoof@example.com', await hashPassword('hunter2-horse'));
+    mockedAuth.mockResolvedValue({ user } as never);
+
+    const payload = 'Your password expires today. Reset it below to keep access.';
+    render(
+      await AccountPage({
+        searchParams: Promise.resolve({ err: payload }),
+      } as never),
+    );
+
+    const alert = screen.getByRole('alert').textContent ?? '';
+    expect(alert).not.toContain('expires today');
+    expect(alert).not.toContain('Reset it below');
+    expect(alert).toBe(UNSPECIFIED);
+  });
+
+  it('still renders every message the action can actually emit', async () => {
+    const user = await makeUser('known@example.com', await hashPassword('hunter2-horse'));
+    mockedAuth.mockResolvedValue({ user } as never);
+
+    for (const message of SET_PASSWORD_ERRORS) {
+      render(
+        await AccountPage({
+          searchParams: Promise.resolve({ err: message }),
+        } as never),
+      );
+      expect(screen.getByRole('alert').textContent).toBe(message);
+      cleanup();
+    }
   });
 });

@@ -7,7 +7,7 @@ import { accounts, getDb, users } from '@/db';
 import { auth, GOOGLE_ONLY_SIGN_IN_MESSAGE } from '@/lib/auth';
 import { describeErrorForLog } from '@/lib/auth/log';
 import { safeRedirectTarget } from '@/lib/auth/redirect';
-import { setPassword } from '@/lib/account/actions';
+import { setPassword, SET_PASSWORD_ERRORS, UNSPECIFIED } from '@/lib/account/actions';
 
 export const metadata: Metadata = {
   title: 'Account · superparakimi',
@@ -84,7 +84,19 @@ export default async function AccountPage(props: PageProps<'/account'>) {
   const hasPassword = user.passwordHash !== null;
   const googleOnly = !hasPassword && providers.includes('google');
 
-  const err = typeof params.err === 'string' ? params.err : null;
+  // Whitelisted, never raw: `err` arrives from a URL query, so rendering it
+  // directly would let /account?err=<anything> print attacker-chosen copy
+  // inside an official-looking alert above a live password field. Only the
+  // strings setPassword actually emits may render here; anything else degrades
+  // to the generic refusal. (React escaping already rules out XSS — this is
+  // content spoofing, which escaping does not address.)
+  const rawErr = typeof params.err === 'string' ? params.err : null;
+  const err =
+    rawErr && SET_PASSWORD_ERRORS.includes(rawErr)
+      ? rawErr
+      : rawErr
+        ? UNSPECIFIED
+        : null;
   // Deliberately not "added" vs "changed": by the time this renders the write
   // has happened, so hasPassword is true for both and would label a first-set
   // as "changed". Telling them apart would need the action to report which it
