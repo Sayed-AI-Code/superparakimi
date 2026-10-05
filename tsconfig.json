@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "exclude": [
+    "node_modules",
+    // Required, not tidy-up. tests/probes/*.ts import each other with an
+    // explicit `.ts` extension (so they run straight under `node`), and
+    // allowImportingTsExtensions is off — every probe file therefore fails
+    // tsc with TS5097 "An import path can only end with a '.ts' extension...",
+    // which also breaks `next build` because build runs type-checking over
+    // `include: **/*.ts`. Removing this exclude does not "clean up" the
+    // config, it turns the build red.
+    "tests/probes"
+  ]
+}

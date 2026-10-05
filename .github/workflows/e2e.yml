@@ -1,0 +1,53 @@
+name: E2E smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: Playwright against the production build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: superparakimi_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # This is the PRODUCTION selector, not DATABASE_URL_TEST: the smoke runs
+      # `next start` with NODE_ENV=production, where db/index.ts demands a real
+      # DATABASE_URL and refuses to fall back to an ephemeral database. CI
+      # satisfying it with a real postgres:16 means the pipeline tests the same
+      # node-postgres path a deploy takes, and the embedded pglite-socket server
+      # stays a local convenience.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/superparakimi_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # The production branch never runs DDL on a request path (see db/index.ts),
+      # so the schema has to be applied here before the app can serve anything.
+      - run: npm run db:migrate
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

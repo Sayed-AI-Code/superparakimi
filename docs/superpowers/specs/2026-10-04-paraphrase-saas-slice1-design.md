@@ -26,7 +26,7 @@ A public SaaS paraphrasing web app. Slice 1 ships sign-in (Google OAuth + email/
 
 ## 4. Architecture
 
-- **Framework:** Next.js 15, App Router, TypeScript throughout.
+- **Framework:** Next.js 16, App Router, TypeScript throughout. (Amended 2026-10-04: `create-next-app@latest` yields 16.3.8; spec's original "15" pin superseded by controller ruling — all slice-1 idioms used are App Router-current on 16.)
 - **Hosting:** Vercel (Hobby acceptable at launch; functions allow up to 300s duration, sufficient for streaming 5k-char rewrites).
 - **Database:** Neon Postgres, accessed via Drizzle ORM with the Neon serverless HTTP driver.
 - **Auth:** Auth.js (NextAuth v5); providers Google OAuth and Credentials (bcrypt-hashed passwords); JWT session strategy (serverless-appropriate); Drizzle adapter persisting `users`, `accounts`, `sessions`.
