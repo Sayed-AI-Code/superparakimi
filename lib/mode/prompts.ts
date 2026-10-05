@@ -34,7 +34,7 @@ const TONE: Record<Mode, string> = {
   simple:
     'Use plain, common words and short declarative sentences; break dense ideas into smaller ones so a general audience understands on first read.',
   formal:
-    'Adopt a polished, professional register: prefer full forms over contractions, and courteous, objective phrasing suitable for business or official correspondence.',
+    'Adopt a polished, professional register: prefer full forms over contractions, and use courteous, objective phrasing suitable for business or official correspondence.',
   creative:
     'Take real liberties with expression: vivid verbs, varied sentence lengths, and unexpected word choices, while the underlying meaning stays exactly intact.',
   academic:

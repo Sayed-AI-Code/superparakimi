@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MODES, STRENGTHS, getSystemPrompt } from '@/lib/mode/prompts';
-import type { Mode } from '@/lib/mode/prompts';
+import type { Mode, Strength } from '@/lib/mode/prompts';
 
 describe('prompt table', () => {
   it('all 18 combinations return non-empty prompts', () => {
@@ -8,7 +8,8 @@ describe('prompt table', () => {
       expect(getSystemPrompt(m.id, s.id).length).toBeGreaterThan(40);
   });
   it('unknown mode throws', () => {
-    expect(() => getSystemPrompt('pirate' as Mode, 'light')).toThrow();
+    expect(() => getSystemPrompt('pirate' as Mode, 'light')).toThrow(RangeError);
+    expect(() => getSystemPrompt('standard', 'turbo' as Strength)).toThrow(RangeError);
   });
   it('all 18 prompts are pairwise distinct', () => {
     const seen = new Map<string, string>();
