@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { CredentialsSignin } from 'next-auth';
 
@@ -39,6 +39,30 @@ describe('signUpWithEmail', () => {
 
     const second = await signUpWithEmail({ email: EMAIL, password: 'other-password' });
     expect(second).toEqual({ error: 'Email already registered' });
+  });
+
+  // Concurrent-signup race, reproduced for real. The `findFirst` pre-check is
+  // the only thing that catches a duplicate today: by the time the INSERT
+  // runs, drizzle-orm 0.45 has wrapped the driver's unique_violation in a
+  // DrizzleQueryError whose SQLSTATE lives on `cause.code`, NOT on `code`
+  // (verified: top-level `.code` is undefined, `.cause.code` is '23505').
+  // Forcing the pre-check to miss makes the unique index the real source of
+  // the failure, so this exercises the branch rather than a mock of it.
+  it('reports "Email already registered" when the race slips past the pre-check and the unique index rejects', async () => {
+    expect(await signUpWithEmail({ email: EMAIL, password: PASSWORD })).toEqual({ ok: true });
+
+    const db = await getDb();
+    const spy = vi.spyOn(db.query.users, 'findFirst').mockResolvedValue(undefined);
+    try {
+      // Real INSERT, real unique index, real DrizzleQueryError.
+      expect(await signUpWithEmail({ email: EMAIL, password: 'other-password' })).toEqual({
+        error: 'Email already registered',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    // And the unique index really was the thing that rejected it.
+    expect((await findUser(EMAIL))?.passwordHash).not.toBeNull();
   });
 
   it('rejects a password shorter than 8 characters and stores nothing', async () => {
