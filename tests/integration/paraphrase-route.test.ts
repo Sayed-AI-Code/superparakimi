@@ -80,9 +80,10 @@ describe('POST /api/paraphrase — pre-stream JSON errors', () => {
     let streamed = false;
     const route = makeRouteHandler({
       provider: {
-        stream: () => {
+        // Must be an async generator — the provider contract is
+        // AsyncIterable<string>, and a plain array fails typecheck.
+        stream: async function* () {
           streamed = true;
-          return [];
         },
       } as ParaphraseProvider,
     });
@@ -96,7 +97,7 @@ describe('POST /api/paraphrase — pre-stream JSON errors', () => {
 
   it('422 on an unknown mode, and no usage row', async () => {
     const route = makeRouteHandler({
-      provider: { stream: () => ['never'] } as ParaphraseProvider,
+      provider: { stream: async function* () {} } as ParaphraseProvider,
     });
     const res = await route.POST(
       fakeReq({ text: 'hello', mode: 'pirate', strength: 'light' }),
@@ -108,7 +109,7 @@ describe('POST /api/paraphrase — pre-stream JSON errors', () => {
 
   it('422 on malformed JSON, and no usage row', async () => {
     const route = makeRouteHandler({
-      provider: { stream: () => ['never'] } as ParaphraseProvider,
+      provider: { stream: async function* () {} } as ParaphraseProvider,
     });
     const res = await route.POST(fakeReq('{"text":'));
     expect(res.status).toBe(422);
@@ -119,9 +120,10 @@ describe('POST /api/paraphrase — pre-stream JSON errors', () => {
     let streamed = false;
     const route = makeRouteHandler({
       provider: {
-        stream: () => {
+        // Must be an async generator — the provider contract is
+        // AsyncIterable<string>, and a plain array fails typecheck.
+        stream: async function* () {
           streamed = true;
-          return [];
         },
       } as ParaphraseProvider,
     });
@@ -136,12 +138,22 @@ describe('POST /api/paraphrase — pre-stream JSON errors', () => {
 
   it('accepts legal max-length multibyte payloads (guard sized for UTF-8, not 8KB)', async () => {
     const route = makeRouteHandler({
-      provider: { stream: () => ['ok'] } as ParaphraseProvider,
+      // An array is not AsyncIterable (the provider contract) — the route
+      // iterates with [Symbol.asyncIterator](), so the fake must be a
+      // generator, not an array.
+      provider: {
+        stream: async function* () {
+          yield 'ok';
+        },
+      } as ParaphraseProvider,
     });
-    // Spec-legal input must never be rejected by the guard. 5,000 chars is
-    // 15,000 bytes in Devanagari (3 B/char) and 20,000 bytes in emoji
-    // (4 B/char) — so an 8 KB guard would break real users.
-    for (const text of ['कि'.repeat(5000), '🜀'.repeat(5000)]) {
+    // Spec-legal input must never be rejected by the byte guard. Both cases
+    // stay within the 5,000-character cap as zod counts it (UTF-16 code
+    // units) while exceeding 8 KB on the wire: 5,000 BMP Devanagari chars
+    // are 15,000 UTF-8 bytes, and 2,500 astral chars are 10,000 bytes
+    // (5,000 units). So an 8 KB guard would break real users, and these
+    // payloads prove the shipped guard does not.
+    for (const text of ['क'.repeat(5000), '🜀'.repeat(2500)]) {
       const res = await route.POST(
         fakeReq({ text, mode: 'standard', strength: 'light' }),
       );
@@ -152,7 +164,7 @@ describe('POST /api/paraphrase — pre-stream JSON errors', () => {
 
   it('rejects text over 5,000 chars with 422', async () => {
     const route = makeRouteHandler({
-      provider: { stream: () => ['never'] } as ParaphraseProvider,
+      provider: { stream: async function* () {} } as ParaphraseProvider,
     });
     const res = await route.POST(
       fakeReq({ text: 'a'.repeat(5001), mode: 'standard', strength: 'light' }),
@@ -169,9 +181,10 @@ describe('POST /api/paraphrase — pre-stream JSON errors', () => {
     let streamed = false;
     const route = makeRouteHandler({
       provider: {
-        stream: () => {
+        // Must be an async generator — the provider contract is
+        // AsyncIterable<string>, and a plain array fails typecheck.
+        stream: async function* () {
           streamed = true;
-          return [];
         },
       } as ParaphraseProvider,
     });
@@ -257,7 +270,9 @@ describe('POST /api/paraphrase — happy path SSE + first-delta quota', () => {
     expect(rows[0]).toMatchObject({
       status: 'completed',
       charsIn: 5,
-      charsOut: 12,
+      // 'Hello' + ' there' = 11 characters, not 12 — the plan's Task 9
+      // example carries an off-by-one; the billed count is the delta total.
+      charsOut: 11,
       mode: 'standard',
       strength: 'light',
     });
@@ -266,7 +281,13 @@ describe('POST /api/paraphrase — happy path SSE + first-delta quota', () => {
 
   it('consumes quota exactly once even for a single-delta stream', async () => {
     const route = makeRouteHandler({
-      provider: { stream: () => ['x'] } as ParaphraseProvider,
+      // A plain array is NOT AsyncIterable, which is the provider contract —
+      // fakes must return an async iterator, not an array.
+      provider: {
+        stream: async function* () {
+          yield 'x';
+        },
+      } as ParaphraseProvider,
     });
     const res = await route.POST(fakeReq(PAYLOAD));
     expect(await sseFrames(res)).toEqual([
@@ -322,18 +343,22 @@ describe('POST /api/paraphrase — failure paths', () => {
     const ac = new AbortController();
     let providerSawAbort = false;
     let release: (err: unknown) => void = () => {};
+    let seenSignal: AbortSignal | null = null;
     const gate = new Promise<never>((_resolve, reject) => {
       release = reject;
-      ac.signal.addEventListener('abort', () => {
-        providerSawAbort = true;
-        release(new DOMException('Aborted', 'AbortError'));
-      });
     });
 
     const route = makeRouteHandler({
       provider: {
         stream: (_t, _m, _s, signal) => {
-          expect(signal).toBe(ac.signal);
+          seenSignal = signal;
+          // Listen on the signal the provider was HANDED: an abort raised on
+          // the caller's controller must arrive here, because this is what
+          // tears down the upstream request.
+          signal.addEventListener('abort', () => {
+            providerSawAbort = true;
+            release(new DOMException('Aborted', 'AbortError'));
+          });
           return (async function* () {
             yield 'first';
             await gate;
@@ -343,7 +368,14 @@ describe('POST /api/paraphrase — failure paths', () => {
       } as ParaphraseProvider,
     });
 
-    const res = await route.POST(fakeReq(PAYLOAD, { signal: ac.signal }));
+    const req = fakeReq(PAYLOAD, { signal: ac.signal });
+    // The route forwards the request's own signal, unwrapped — the provider
+    // composes its own 120s timeout, so re-wrapping here would be wrong.
+    // (undici's Request owns a distinct signal object, so equality against
+    // ac.signal is not a meaningful check; req.signal is.)
+    expect(seenSignal).toBe(null);
+    const res = await route.POST(req);
+    expect(seenSignal).toBe(req.signal);
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     const first = decoder.decode((await reader.read()).value);
@@ -383,12 +415,17 @@ describe('POST /api/paraphrase — failure paths', () => {
     const route = makeRouteHandler({
       provider: {
         stream: async function* () {
-          throw new TypeError('socket hang up');
+          // Per the provider contract (lib/paraphrase/types.ts), every
+          // upstream/transport fault surfaces as UpstreamUnavailableError —
+          // the provider never leaks a raw TypeError. A bare Error here would
+          // be a programmer fault, which the route correctly answers 500.
+          throw new UpstreamUnavailableError('socket hang up');
         },
       } as ParaphraseProvider,
     });
     const res = await route.POST(fakeReq(PAYLOAD, { signal: ac.signal }));
     expect(res.status).toBe(502);
     expect(await rowsFor(userId)).toHaveLength(0);
+    expect((await check(userId)).used).toBe(0);
   });
 });

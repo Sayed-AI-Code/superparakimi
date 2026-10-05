@@ -223,6 +223,18 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
       }
 
       const firstDelta = first.value;
+      // A delivered delta is always billed before it is recorded — the
+      // priming loop above bills on the first non-empty delta and only then
+      // sets `first`. TypeScript cannot see that coupling across the loop, so
+      // the invariant is stated explicitly instead of cast away; reaching this
+      // branch would mean text was delivered unbilled, which is a 500 and
+      // still writes no row.
+      if (eventId === null) {
+        return jsonError(500, {
+          error: GENERIC_STREAM_MESSAGE,
+          correlationId: crypto.randomUUID(),
+        });
+      }
       const billedId = eventId;
 
       return sseResponse(
