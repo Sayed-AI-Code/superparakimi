@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 import { getDb, resetTestDb, users } from '@/db';
-import { hashPassword, verifyPassword } from '@/lib/auth/passwords';
+import {
+  MAX_PASSWORD_BYTES,
+  hashPassword,
+  passwordByteLength,
+  verifyPassword,
+} from '@/lib/auth/passwords';
+import { signUpWithEmail } from '@/lib/auth/signup';
 
 // auth() is a module export, so mocking it is the sanctioned session seam —
 // same pattern as tests/integration/usage-route.test.ts. The database and the
@@ -15,7 +21,7 @@ vi.mock('@/lib/auth', () => ({
 }));
 
 import { auth } from '@/lib/auth';
-import { setPassword } from '@/lib/account/actions';
+import { setPassword, PASSWORD_TOO_LONG } from '@/lib/account/actions';
 
 const mockedAuth = vi.mocked(auth);
 
@@ -251,5 +257,72 @@ describe('setPassword — the action, not the page, is the authorization boundar
     expect(
       await setPassword(gone.id, { current: PASSWORD, next: NEW_PASSWORD }),
     ).toEqual({ error: 'Not signed in.' });
+  });
+});
+
+describe('bcrypt 72-byte ceiling is enforced at creation, never at verification', () => {
+  // bcrypt hashes only the first 72 BYTES and silently drops the remainder, so
+  // two different long passwords sharing a 72-byte prefix verify against the
+  // SAME hash. Reproduced against this project's bcryptjs before the guard was
+  // written:
+  //   compare('w'.repeat(72)+'BOB', hash('w'.repeat(72)+'ALICE')) === true
+  // So creation paths refuse past the ceiling instead of truncating, while the
+  // verification path stays uncapped to avoid locking anyone out.
+
+  it('rejects a new password past 72 bytes and leaves the stored hash untouched', async () => {
+    const tooLong = 'w'.repeat(72) + 'ALICE';
+    const before = await hashOf(owner.id);
+
+    expect(await setPassword(owner.id, { current: PASSWORD, next: tooLong })).toEqual({
+      error: PASSWORD_TOO_LONG,
+    });
+    expect(await hashOf(owner.id)).toBe(before);
+  });
+
+  it('measures BYTES, not characters: 24 astral chars are 96 bytes and are refused', async () => {
+    // 24 emoji = 48 UTF-16 code units, which a `.length` check would wave
+    // through at 48 <= 72. Measured in bytes it is 96 and must be refused.
+    const astral = '\u{1F600}'.repeat(24);
+    expect(astral.length).toBe(48);
+    expect(passwordByteLength(astral)).toBe(96);
+
+    const res = await setPassword(owner.id, { current: PASSWORD, next: astral });
+    expect(res).toEqual({ error: PASSWORD_TOO_LONG });
+  });
+
+  it('accepts a password of exactly 72 bytes — the ceiling is not premature', async () => {
+    const exact = 'x'.repeat(72);
+    expect(passwordByteLength(exact)).toBe(MAX_PASSWORD_BYTES);
+
+    expect(await setPassword(owner.id, { current: PASSWORD, next: exact })).toEqual({
+      ok: true,
+    });
+    expect(await verifyPassword(exact, await hashOf(owner.id))).toBe(true);
+  });
+
+  it('still verifies a legacy over-length CURRENT password, so nobody is locked out', async () => {
+    // A hash minted before the guard existed may derive from a >72-byte
+    // password. That person must still be able to change it, so the cap must
+    // apply to `next` only.
+    const legacy = 'l'.repeat(80);
+    const legacyHash = await hashPassword(legacy);
+    const legacyUser = await makeUser('legacy@example.com', legacyHash);
+    signInAs(legacyUser);
+
+    const res = await setPassword(legacyUser.id, {
+      current: legacy,
+      next: NEW_PASSWORD,
+    });
+    expect(res).toEqual({ ok: true });
+    expect(await verifyPassword(legacy, await hashOf(legacyUser.id))).toBe(false);
+    expect(await verifyPassword(NEW_PASSWORD, await hashOf(legacyUser.id))).toBe(true);
+  });
+
+  it('signUpWithEmail refuses past the ceiling', async () => {
+    const res = await signUpWithEmail({
+      email: `cap-${crypto.randomUUID()}@example.com`,
+      password: 'p'.repeat(73),
+    });
+    expect(res).toEqual({ error: PASSWORD_TOO_LONG });
   });
 });

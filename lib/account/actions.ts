@@ -4,7 +4,12 @@ import { z } from 'zod';
 import { getDb, users } from '@/db';
 import { auth } from '@/lib/auth';
 import { describeErrorForLog } from '@/lib/auth/log';
-import { hashPassword, verifyPassword } from '@/lib/auth/passwords';
+import {
+  MAX_PASSWORD_BYTES,
+  hashPassword,
+  passwordByteLength,
+  verifyPassword,
+} from '@/lib/auth/passwords';
 
 // Pure server module, no 'use server' directive — the same shape as
 // lib/auth/signup.ts: keeping it directive-free means Vitest imports it
@@ -22,6 +27,7 @@ import { hashPassword, verifyPassword } from '@/lib/auth/passwords';
 export type SetPasswordResult = { ok: true } | { error: string };
 
 export const PASSWORD_TOO_WEAK = 'Password must be at least 8 characters';
+export const PASSWORD_TOO_LONG = `Password must be ${MAX_PASSWORD_BYTES} bytes or shorter.`;
 
 // Copy is spec'd for the weak-password case; the rest are ours and stay
 // deliberately vague off-origin. None of these ever carry a hash, a password,
@@ -33,13 +39,23 @@ const UNSPECIFIED = 'Something went wrong. Please try again.';
 
 const inputSchema = z.object({
   userId: z.uuid(),
-  next: z.string().min(8, { error: PASSWORD_TOO_WEAK }),
+  next: z
+    .string()
+    .min(8, { error: PASSWORD_TOO_WEAK })
+    // Same byte ceiling as signUpWithEmail, and for the same reason: bcrypt
+    // silently drops everything past 72 bytes, so two different long
+    // passphrases sharing a prefix verify against the same hash. Enforced on
+    // this CREATION path only — `current` below is deliberately uncapped so a
+    // member who registered a longer password before this guard existed can
+    // still sign in and change it.
+    .refine((pw) => passwordByteLength(pw) <= MAX_PASSWORD_BYTES, {
+      error: PASSWORD_TOO_LONG,
+    }),
   // No floor on purpose: a NULL-hash (Google-only) account has no current
   // password to send, and that first-set is a required path. Accounts that DO
   // have a hash are refused further down, where there is a hash to compare
-  // against. No max either, so this matches signUpWithEmail — both entry
-  // points let bcrypt truncate at 72 bytes rather than one capping at 512
-  // and the other not (flagged in the task report).
+  // against. No max either: capping the verification input would lock out
+  // anyone whose stored hash predates MAX_PASSWORD_BYTES.
   current: z.string(),
 });
 

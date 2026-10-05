@@ -2,13 +2,28 @@ import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { getDb, users } from '@/db';
-import { hashPassword } from '@/lib/auth/passwords';
+import {
+  MAX_PASSWORD_BYTES,
+  hashPassword,
+  passwordByteLength,
+} from '@/lib/auth/passwords';
 
 // Pure server module (no 'use server' directive) so it stays unit-testable;
 // pages wrap it in inline server actions.
+const PASSWORD_TOO_LONG = `Password must be ${MAX_PASSWORD_BYTES} bytes or shorter.`;
+
 const signUpInputSchema = z.object({
   email: z.email({ error: 'Enter a valid email address.' }).trim().toLowerCase(),
-  password: z.string().min(8, { error: 'Password must be at least 8 characters' }),
+  password: z
+    .string()
+    .min(8, { error: 'Password must be at least 8 characters' })
+    // Rejected rather than silently truncated: past this point bcrypt ignores
+    // the remainder, so a longer passphrase would be weaker than the user
+    // chose and could collide with a different long passphrase sharing the
+    // same 72-byte prefix.
+    .refine((pw) => passwordByteLength(pw) <= MAX_PASSWORD_BYTES, {
+      error: PASSWORD_TOO_LONG,
+    }),
 });
 
 export type SignUpResult = { ok: true } | { error: string };
