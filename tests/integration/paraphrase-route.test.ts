@@ -2,9 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 
 import { getDb, resetTestDb, usageEvents, users } from '@/db';
-import { UpstreamUnavailableError } from '@/lib/paraphrase/types';
+import {
+  DEFAULT_MODEL,
+  UpstreamUnavailableError,
+} from '@/lib/paraphrase/types';
 import type { ParaphraseProvider } from '@/lib/paraphrase/types';
-import { beginUsage, check, completeUsage } from '@/lib/quota/quotaService';
+import {
+  beginUsage,
+  check,
+  completeUsage,
+  FREE_DAILY_LIMIT,
+} from '@/lib/quota/quotaService';
 
 // auth() is a module export, so mocking it is the sanctioned session seam.
 // The quota service and the database are deliberately NOT mocked: they are
@@ -17,6 +25,9 @@ vi.mock('@/lib/auth', () => ({
 
 import { auth } from '@/lib/auth';
 import { makeRouteHandler } from '@/app/api/paraphrase/route';
+// Imported under an alias so the cross-endpoint agreement test can call the
+// usage endpoint's own handler. It shares the mocked auth() above.
+import { GET as usageGet } from '@/app/api/usage/route';
 
 const mockedAuth = vi.mocked(auth);
 
@@ -538,5 +549,56 @@ describe('POST /api/paraphrase — failure paths', () => {
     expect(rows[0].status).toBe('aborted');
     expect(iteratorReturned).toBe(true);
     expect((await check(userId)).used).toBe(1);
+  });
+});
+
+describe('remaining is clamped identically at both derivation sites', () => {
+  // quotaService documents an ACCEPTED race: two concurrent first-deltas can
+  // both pass check() and both insert, so `used` legitimately exceeds `limit`.
+  // The overcount is tolerated; a negative `remaining` is not, because two
+  // different endpoints derive it — GET /api/usage and the SSE `done` frame.
+  // If only one clamps, they disagree about the same user at the same instant
+  // and the meter renders "-1 of 10 left today" after a generation.
+  //
+  // The race is reproduced deterministically: seed limit-1 rows so the gate
+  // still passes, let the route bill its own first delta, then have the
+  // provider insert a rival row mid-stream before it finishes.
+  it('done{remaining} never goes negative and agrees with GET /api/usage', async () => {
+    for (let i = 0; i < FREE_DAILY_LIMIT - 1; i++) {
+      await beginUsage(userId, 5, DEFAULT_MODEL, 'standard', 'light');
+    }
+    expect((await check(userId)).used).toBe(FREE_DAILY_LIMIT - 1);
+
+    const route = makeRouteHandler({
+      provider: {
+        stream: async function* () {
+          yield 'ok';
+          // The rival request that lost the gate race but won the insert.
+          await beginUsage(userId, 5, DEFAULT_MODEL, 'standard', 'light');
+        },
+      } as ParaphraseProvider,
+    });
+
+    const res = await route.POST(fakeReq(PAYLOAD));
+    expect(res.status).toBe(200);
+
+    const frames = await sseFrames(res);
+    const done = frames.at(-1) as { type: string; remaining: number };
+    expect(done.type).toBe('done');
+    expect(done.remaining).toBe(0);
+    expect(done.remaining).toBeGreaterThanOrEqual(0);
+
+    // The load-bearing assertion: the two endpoints must not contradict each
+    // other. Pinning only the SSE frame would let the endpoint drift, and
+    // vice versa.
+    const usage = (await usageGet()) as Response;
+    expect(usage.status).toBe(200);
+    const body = (await usage.json()) as {
+      used: number;
+      limit: number;
+      remaining: number;
+    };
+    expect(body.used).toBe(FREE_DAILY_LIMIT + 1);
+    expect(body.remaining).toBe(done.remaining);
   });
 });

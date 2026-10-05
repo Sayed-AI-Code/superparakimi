@@ -87,7 +87,12 @@ function resolveModel(): string {
 
 async function remainingFor(userId: string): Promise<number> {
   const status = await check(userId);
-  return status.limit - status.used;
+  // Clamped here exactly as in GET /api/usage — this feeds the terminal `done`
+  // frame, so an unclamped value would reach the meter after every generation
+  // that trips quotaService's documented accepted race (used=11) and render
+  // "-1 of 10 left today" while the endpoint says 0. Both derivation sites
+  // must agree or the two endpoints disagree about the same user's day.
+  return Math.max(0, status.limit - status.used);
 }
 
 function sseResponse(

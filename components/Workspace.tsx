@@ -144,6 +144,11 @@ export default function Workspace() {
           if (snapshot) {
             publishUsage({
               ...snapshot,
+              // `frame.remaining` arrives clamped at both server derivation sites
+              // (GET /api/usage and remainingFor on the `done` frame), so
+              // re-deriving `used` from it cannot inflate past the limit. If
+              // either server clamp is ever removed this inverts into a
+              // `used` that exceeds `limit`.
               remaining: frame.remaining,
               used: snapshot.limit - frame.remaining,
             });
