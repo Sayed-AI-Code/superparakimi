@@ -85,6 +85,11 @@ export default async function AccountPage(props: PageProps<'/account'>) {
   const googleOnly = !hasPassword && providers.includes('google');
 
   const err = typeof params.err === 'string' ? params.err : null;
+  // Deliberately not "added" vs "changed": by the time this renders the write
+  // has happened, so hasPassword is true for both and would label a first-set
+  // as "changed". Telling them apart would need the action to report which it
+  // did — a wider contract than spec §5 asks for. The section header below
+  // already reflects the new state, so "saved" is the honest wording here.
   const saved = params.saved === '1';
 
   return (
@@ -108,7 +113,7 @@ export default async function AccountPage(props: PageProps<'/account'>) {
         )}
         {saved && (
           <p className="mt-6 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-            {hasPassword ? 'Password changed.' : 'Password added.'}
+            Password saved.
           </p>
         )}
 
@@ -172,6 +177,7 @@ export default async function AccountPage(props: PageProps<'/account'>) {
               redirect(safeRedirectTarget('/account?saved=1'));
             }}
           >
+            <input type="hidden" name="mode" value={hasPassword ? 'change' : 'add'} />
             {hasPassword && (
               <label className="flex flex-col gap-1 text-sm">
                 Current password
@@ -191,7 +197,7 @@ export default async function AccountPage(props: PageProps<'/account'>) {
                 name="next"
                 required
                 minLength={8}
-                autoComplete={hasPassword ? 'new-password' : 'new-password'}
+                autoComplete="new-password"
                 className="rounded-md border border-black/10 bg-white px-3 py-2 text-black dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-50"
               />
             </label>
