@@ -20,7 +20,15 @@ export * from './schema';
 // and each driver's HKT extends PgQueryResultHKT.
 export type DB = PgDatabase<PgQueryResultHKT, typeof schema>;
 
-const migrationsFolder = path.join(import.meta.dirname, '..', 'drizzle');
+// migrationsFolder is resolved lazily (inside createDb) rather than at
+// module scope: Next 16's Turbopack page-data worker evaluates statically
+// imported modules with import.meta.dirname === undefined, and any route
+// that imports this module (via lib/auth) would fail `next build`.
+// Migration only runs under NODE_ENV=test (Vitest), where import.meta
+// .dirname is valid.
+function migrationsFolder(): string {
+  return path.join(import.meta.dirname, '..', 'drizzle');
+}
 
 export type TestBackend = 'node-postgres' | 'pglite';
 
@@ -39,12 +47,12 @@ async function createDb(): Promise<DB> {
     if (selectTestBackend(testUrl) === 'node-postgres') {
       const pool = new Pool({ connectionString: testUrl });
       const db = drizzleNodePg(pool, { schema });
-      await migrateNodePg(db, { migrationsFolder });
+      await migrateNodePg(db, { migrationsFolder: migrationsFolder() });
       return db;
     }
     const client = new PGlite();
     const db = drizzlePglite(client, { schema });
-    await migratePglite(db, { migrationsFolder });
+    await migratePglite(db, { migrationsFolder: migrationsFolder() });
     return db;
   }
   return drizzleNeonHttp(neon(process.env.DATABASE_URL!), { schema });
