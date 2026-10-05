@@ -177,7 +177,6 @@ export default async function AccountPage(props: PageProps<'/account'>) {
               redirect(safeRedirectTarget('/account?saved=1'));
             }}
           >
-            <input type="hidden" name="mode" value={hasPassword ? 'change' : 'add'} />
             {hasPassword && (
               <label className="flex flex-col gap-1 text-sm">
                 Current password
