@@ -27,6 +27,14 @@ describe('safeRedirectTarget', () => {
     expect(safeRedirectTarget('\\/evil.com')).toBe('/app');
     expect(safeRedirectTarget('\\\\evil.com')).toBe('/app');
     expect(safeRedirectTarget('/\\/evil.com')).toBe('/app');
+    // Control-character infix family: WHATWG parsers strip TAB/LF/CR from
+    // the input before parsing, so `/\t//evil.com` reaches the browser as
+    // `///evil.com` and escapes the origin. The tab form is a legal
+    // Location header value.
+    expect(safeRedirectTarget('/\t//evil.com')).toBe('/app');
+    expect(safeRedirectTarget('/\n//evil.com')).toBe('/app');
+    expect(safeRedirectTarget('/\r//evil.com')).toBe('/app');
+    expect(safeRedirectTarget('/\t\t//evil.com')).toBe('/app');
   });
 
   it('never returns a value a browser can resolve off-origin', () => {
@@ -40,6 +48,10 @@ describe('safeRedirectTarget', () => {
       'https://evil.com/x',
       'javascript:alert(1)',
       '/%5Cevil.com',
+      '/\t//evil.com',
+      '/ \t/\\/evil.com',
+      '/\n//evil.com',
+      '/\r//evil.com',
       '',
       '   ',
       undefined,

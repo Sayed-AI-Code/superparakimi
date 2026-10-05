@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import { signUpWithEmail } from '@/lib/auth/signup';
+import { describeErrorForLog } from '@/lib/auth/log';
 
 export default async function SignUpPage(props: PageProps<'/signup'>) {
   const params = await props.searchParams;
@@ -36,10 +37,11 @@ export default async function SignUpPage(props: PageProps<'/signup'>) {
               password: String(formData.get('password') ?? ''),
             }).catch((error: unknown) => {
               // signUpWithEmail rethrows unexpected failures (everything but
-              // duplicate-email) so they are never anonymous: log the
-              // error's message + stack server-side, render a generic
-              // string to the user. Credentials never reach the log.
-              console.error('[signup] signUpWithEmail failed', error);
+              // duplicate-email) so they are never anonymous. Log only
+              // non-credential diagnostics: DrizzleQueryError embeds the
+              // SQL and params (email + bcrypt hash) in its message/stack,
+              // so the raw error must not reach the log.
+              console.error('[signup] signUpWithEmail failed', describeErrorForLog(error));
               return { error: 'Something went wrong. Please try again.' };
             });
             if ('error' in result) {
