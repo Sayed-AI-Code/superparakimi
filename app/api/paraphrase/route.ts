@@ -21,11 +21,25 @@ const RATE_WINDOW_MS = 60_000;
 // an 8 KB guard would reject legitimate non-Latin text.
 const MAX_BODY_BYTES = 32_768;
 
+// PRE-STREAM only (no usage_events row exists, quota untouched). Spec §7
+// quotes this copy verbatim; do not reuse it anywhere a row was created.
 const UPSTREAM_ERROR_MESSAGE = "Service hiccup — didn't count against your limit";
 const CANCELLED_MESSAGE = 'Request cancelled.';
 const GENERIC_STREAM_MESSAGE = 'Generation stopped unexpectedly.';
 const RATE_LIMIT_MESSAGE = 'Too many requests. Please slow down.';
 const QUOTA_MESSAGE = "You've used all your free paraphrases for today.";
+
+// DURING-STREAMING only (beginUsage already created the row, so the slot is
+// spent — see the first-delta rule in lib/quota/quotaService.ts). Spec §7:
+// "UI notes the request counts because generation started." These must never
+// borrow the pre-stream "didn't count" wording, which is true only before the
+// first delta.
+const BILLED_UPSTREAM_MESSAGE =
+  'Service hiccup — this request counted, because generation started.';
+const BILLED_CANCELLED_MESSAGE =
+  'Stopped — this request counted, because generation started.';
+const BILLED_GENERIC_MESSAGE =
+  'Generation stopped unexpectedly — this request counted, because generation started.';
 
 type Frame =
   | { type: 'delta'; text: string }
@@ -126,6 +140,15 @@ function sseResponse(
 export function makeRouteHandler({ provider }: { provider: ParaphraseProvider }) {
   return {
     async POST(request: Request): Promise<Response> {
+      // ONE id per request, minted before anything that can fail. Spec §7 makes
+      // correlation ids the seam between what the client saw and what the server
+      // logged; an id minted inline at each call site cannot join to anything,
+      // and one minted only inside a console.error call is pure decoration.
+      // Attached to 5xx/502 bodies and to every log line for this request;
+      // deliberately NOT added to the 401/422/429 bodies, whose shapes are
+      // pinned by the spec and by existing tests.
+      const correlationId = crypto.randomUUID();
+
       const session = await auth();
       const userId = session?.user?.id;
       if (!userId) {
@@ -205,11 +228,16 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
         // Caller cancellation first: an abort that is not shaped like an
         // AbortError must not be misreported as an upstream fault.
         if (request.signal.aborted || isAbortLike(error)) {
-          if (eventId !== null) await abortUsage(eventId);
-          return jsonError(499, { error: CANCELLED_MESSAGE });
+          // A row can already exist here: the priming loop bills before it
+          // breaks, so an abort on a later iteration has spent the slot. The
+          // copy must follow the row, not the abort.
+          if (eventId !== null) {
+            await abortUsage(eventId);
+            return jsonError(499, { error: BILLED_CANCELLED_MESSAGE, correlationId });
+          }
+          return jsonError(499, { error: CANCELLED_MESSAGE, correlationId });
         }
         if (eventId === null) {
-          const correlationId = crypto.randomUUID();
           // Log the fault the user was just given an ID for — a correlation ID
           // that resolves to nothing server-side is decoration, not diagnosis.
           // The projection keeps credentials and query text out of the log.
@@ -228,27 +256,35 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
             correlationId,
           });
         }
-        // Delta already delivered and billed: end the stream honestly.
-        if (eventId !== null) await abortUsage(eventId);
+        // Delta already delivered and billed: end the stream honestly, with
+        // copy that admits the slot was spent.
+        await abortUsage(eventId);
         return sseResponse(
           (async function* () {
             yield sse({
               type: 'error',
               message: error instanceof UpstreamUnavailableError
-                ? UPSTREAM_ERROR_MESSAGE
-                : GENERIC_STREAM_MESSAGE,
+                ? BILLED_UPSTREAM_MESSAGE
+                : BILLED_GENERIC_MESSAGE,
             });
           })(),
         );
       }
 
       // Upstream closed without a single delta: nothing generated, nothing
-      // billed, no row.
+      // billed, no row. Still logged — this id goes to the client, and an id
+      // with no matching log line cannot be used to diagnose anything.
       if (first === null) {
         if (eventId !== null) await abortUsage(eventId);
+        console.error('[paraphrase] upstream returned zero deltas', {
+          correlationId,
+          mode,
+          strength,
+          charsIn,
+        });
         return jsonError(502, {
           error: UPSTREAM_ERROR_MESSAGE,
-          correlationId: crypto.randomUUID(),
+          correlationId,
         });
       }
 
@@ -260,9 +296,15 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
       // branch would mean text was delivered unbilled, which is a 500 and
       // still writes no row.
       if (eventId === null) {
+        // Unreachable by construction, but it answers with an id, so it must
+        // log that same id — otherwise the client holds a handle to nothing.
+        console.error('[paraphrase] delivered delta without a billed row', {
+          correlationId,
+          charsIn,
+        });
         return jsonError(500, {
           error: GENERIC_STREAM_MESSAGE,
-          correlationId: crypto.randomUUID(),
+          correlationId,
         });
       }
       const billedId = eventId;
@@ -299,7 +341,7 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
             }
             if (request.signal.aborted) {
               await settle();
-              yield sse({ type: 'error', message: CANCELLED_MESSAGE });
+              yield sse({ type: 'error', message: BILLED_CANCELLED_MESSAGE });
               return;
             }
             await completeUsage(billedId, totalChars);
@@ -311,18 +353,20 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
           } catch (error) {
             await settle();
             console.error('[paraphrase] stream failed', {
-              correlationId: crypto.randomUUID(),
+              correlationId,
               billedId,
               ...describeErrorForLog(error),
             });
-            // Check the signal before naming a fault: a cancellation is not
-            // the provider's failure.
+            // Every exit from here is POST-billing: `billedId` is non-null by
+            // construction, so the row exists and the slot is spent regardless of
+            // whether this was a cancellation, an upstream fault, or a programmer
+            // fault. The unbilled copies must never appear in this generator.
             const message =
               request.signal.aborted || isAbortLike(error)
-                ? CANCELLED_MESSAGE
+                ? BILLED_CANCELLED_MESSAGE
                 : error instanceof UpstreamUnavailableError
-                  ? UPSTREAM_ERROR_MESSAGE
-                  : GENERIC_STREAM_MESSAGE;
+                  ? BILLED_UPSTREAM_MESSAGE
+                  : BILLED_GENERIC_MESSAGE;
             yield sse({ type: 'error', message });
           } finally {
             // Any remaining exit — abandonment, throw inside catch, early
