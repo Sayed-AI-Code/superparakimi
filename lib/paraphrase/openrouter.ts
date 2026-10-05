@@ -1,10 +1,9 @@
 import OpenAI, { APIUserAbortError } from 'openai';
 import { getSystemPrompt } from '@/lib/mode/prompts';
 import type { Mode, Strength } from '@/lib/mode/prompts';
-import { UpstreamUnavailableError, UPSTREAM_TIMEOUT_MS } from './types';
+import { DEFAULT_MODEL, UpstreamUnavailableError, UPSTREAM_TIMEOUT_MS } from './types';
 import type { ParaphraseProvider } from './types';
 
-const DEFAULT_MODEL = 'openai/gpt-4o-mini';
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 
 function isAbortLike(error: unknown): boolean {

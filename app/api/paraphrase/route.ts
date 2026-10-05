@@ -1,14 +1,15 @@
 import { auth } from '@/lib/auth';
+import { describeErrorForLog } from '@/lib/auth/log';
 import { createOpenRouterProvider } from '@/lib/paraphrase/openrouter';
 import type { ParaphraseProvider } from '@/lib/paraphrase/types';
-import { UpstreamUnavailableError } from '@/lib/paraphrase/types';
+import { DEFAULT_MODEL, UpstreamUnavailableError } from '@/lib/paraphrase/types';
 import {
   abortUsage,
   beginUsage,
   check,
   completeUsage,
 } from '@/lib/quota/quotaService';
-import { ANON_LIMIT_60S, AUTHED_LIMIT_60S, checkRate } from '@/lib/ratelimit';
+import { AUTHED_LIMIT_60S, checkRate } from '@/lib/ratelimit';
 import { paraphraseRequestSchema } from '@/lib/validation';
 
 const RATE_WINDOW_MS = 60_000;
@@ -49,7 +50,13 @@ function jsonError(
 }
 
 function clientIp(request: Request): string {
-  // First hop of x-forwarded-for: the client address behind the trusted proxy.
+  // First hop of x-forwarded-for. This is trustworthy ONLY because the
+  // deploy target is Vercel (spec §11), whose edge overwrites the inbound
+  // value; on any other host a client could forge it and make this limiter a
+  // no-op. The Web Request API exposes no peer address here, so there is no
+  // fallback — anonymous traffic has no IP to key on and shares one bucket.
+  // Anonymous per-IP limiting therefore belongs at the edge (proxy.ts), and
+  // until that exists treat this limiter as advisory. See ledger.
   const forwarded = request.headers.get('x-forwarded-for');
   return forwarded?.split(',')[0]?.trim() || 'unknown';
 }
@@ -59,7 +66,9 @@ function isAbortLike(error: unknown): boolean {
 }
 
 function resolveModel(): string {
-  return process.env.PARAPHRASE_MODEL ?? 'openai/gpt-4o-mini';
+  // DEFAULT_MODEL is shared with the provider, so the model recorded on the
+  // usage row is the model actually called.
+  return process.env.PARAPHRASE_MODEL ?? DEFAULT_MODEL;
 }
 
 async function remainingFor(userId: string): Promise<number> {
@@ -78,11 +87,10 @@ function sseResponse(chunks: AsyncGenerator<Uint8Array>): Response {
         }
         controller.enqueue(next.value);
       },
-      async cancel(reason) {
-        // Consumer went away: release the provider iterator so its upstream
-        // request is torn down instead of streaming into a discarded stream.
+      async cancel() {
+        // Consumer went away: release THIS generator, whose `finally` in turn
+        // releases the provider's iterator and terminalizes the usage row.
         await chunks.return(undefined);
-        void reason;
       },
     }),
     {
@@ -136,9 +144,12 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
       const { text, mode, strength } = parsed.data;
 
       // Abuse control, NOT quota: a rate-limit denial consumes no quota and
-      // writes no usageEvents row.
-      const limit = session ? AUTHED_LIMIT_60S : ANON_LIMIT_60S;
-      const rate = checkRate(clientIp(request), limit, RATE_WINDOW_MS);
+      // writes no usageEvents row. The session is guaranteed by the 401 gate
+      // above, so this is always the authenticated limit; anonymous traffic is
+      // rejected before it reaches this handler and is rate-limited at the
+      // edge instead (see proxy.ts), which is what makes the spec's anonymous
+      // 10 req/min on /api/* real.
+      const rate = checkRate(clientIp(request), AUTHED_LIMIT_60S, RATE_WINDOW_MS);
       if (!rate.allowed) {
         return jsonError(
           429,
@@ -187,15 +198,23 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
           return jsonError(499, { error: CANCELLED_MESSAGE });
         }
         if (eventId === null) {
+          const correlationId = crypto.randomUUID();
+          // Log the fault the user was just given an ID for — a correlation ID
+          // that resolves to nothing server-side is decoration, not diagnosis.
+          // The projection keeps credentials and query text out of the log.
+          console.error('[paraphrase] pre-delta failure', {
+            correlationId,
+            ...describeErrorForLog(error),
+          });
           if (error instanceof UpstreamUnavailableError) {
             return jsonError(502, {
               error: UPSTREAM_ERROR_MESSAGE,
-              correlationId: crypto.randomUUID(),
+              correlationId,
             });
           }
           return jsonError(500, {
             error: GENERIC_STREAM_MESSAGE,
-            correlationId: crypto.randomUUID(),
+            correlationId,
           });
         }
         // Delta already delivered and billed: end the stream honestly.
@@ -239,9 +258,14 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
 
       return sseResponse(
         (async function* () {
-          yield sse({ type: 'delta', text: firstDelta });
           let settled = false;
           try {
+            // The first delta yield must be INSIDE the try/finally. If it
+            // sits outside, a consumer that cancels after reading delta one
+            // leaves the generator suspended before the try block, .return()
+            // exits without running the finally, and the row is stranded in
+            // `streaming` while still holding the user's quota.
+            yield sse({ type: 'delta', text: firstDelta });
             for (;;) {
               const next = await iterator.next();
               if (next.done) break;
@@ -263,6 +287,11 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
               await abortUsage(billedId);
               settled = true;
             }
+            console.error('[paraphrase] stream failed', {
+              correlationId: crypto.randomUUID(),
+              billedId,
+              ...describeErrorForLog(error),
+            });
             // Check the signal before naming a fault: a cancellation is not
             // the provider's failure.
             const message =
@@ -272,6 +301,15 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
                   ? UPSTREAM_ERROR_MESSAGE
                   : GENERIC_STREAM_MESSAGE;
             yield sse({ type: 'error', message });
+          } finally {
+            // An abandoned consumer — reader.cancel(), navigation away, dead
+            // socket — resumes the generator at the pending `yield` via
+            // .return() and never runs `catch`. This is therefore the only
+            // place that can terminalize the row: without it the row stays
+            // `streaming` forever while still consuming the user's quota, and
+            // the provider's upstream request is never released.
+            if (!settled) await abortUsage(billedId);
+            await iterator.return?.();
           }
         })(),
       );

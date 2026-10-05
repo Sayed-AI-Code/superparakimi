@@ -17,3 +17,11 @@ export class UpstreamUnavailableError extends Error {
 }
 
 export const UPSTREAM_TIMEOUT_MS = 120_000;
+
+/**
+ * Single source of truth for the model id. The provider calls upstream with
+ * it AND the route records it on the usage row — two sites, one constant.
+ * Duplicated defaults here and in the route would let `usageEvents.model`
+ * silently lie once one side drifts.
+ */
+export const DEFAULT_MODEL = 'openai/gpt-4o-mini';
