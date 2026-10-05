@@ -7,7 +7,8 @@
 // dependency-free — no `@/` alias, which bare node cannot resolve.
 import { formatResetLocal } from '../../lib/workspace/helpers.ts';
 
-// Pinned UTC instant: 2026-03-14T05:30:31.000Z
-//   Asia/Karachi    (+05:00) → 10:30:31
-//   America/New_York(-04:00) → 01:30:31
-process.stdout.write(formatResetLocal('2026-03-14T05:30:31.000Z'));
+// The instant comes from argv so one probe can pin several instants — including
+// one that rolls the calendar DAY, the highest-value local-display bug (the
+// hour alone can look right on the wrong date).
+const instant = process.argv[2] ?? '2026-03-14T05:30:31.000Z';
+process.stdout.write(formatResetLocal(instant));

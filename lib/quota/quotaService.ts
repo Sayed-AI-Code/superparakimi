@@ -2,7 +2,12 @@ import { and, count, eq, gte } from 'drizzle-orm';
 import { getDb, usageEvents } from '@/db';
 import type { Mode, Strength } from '@/lib/mode/prompts';
 
-export const FREE_DAILY_LIMIT = 10;
+// Re-exported so server call sites keep importing it from here unchanged. The
+// declaration lives in ./limit.ts, which is dependency-free: client components
+// must import the constant from ./limit.ts, never from this file, or the
+// browser bundle pulls in the Postgres driver and `next build` fails.
+export { FREE_DAILY_LIMIT } from './limit';
+import { FREE_DAILY_LIMIT } from './limit';
 
 export type QuotaStatus = {
   allowed: boolean;

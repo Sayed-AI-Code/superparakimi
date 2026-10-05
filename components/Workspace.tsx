@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { MODES, STRENGTHS } from '@/lib/mode/prompts';
 import type { Mode, Strength } from '@/lib/mode/prompts';
 import { safeRedirectTarget } from '@/lib/auth/redirect';
+import { FREE_DAILY_LIMIT } from '@/lib/quota/limit';
 import { MAX_INPUT_CHARS } from '@/lib/validation';
 import {
   capChars,
@@ -276,9 +277,12 @@ export default function Workspace() {
         Paraphrase
       </h1>
       <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+        {/* Before the mount fetch resolves there is no true remaining count, so
+            this states the plan's constant allowance — a published fact about the
+            plan, not an invented count for this visitor, who may have 0 left. */}
         {usage
           ? `${usage.remaining} of ${usage.limit} left today.`
-          : 'Your remaining count for today is loading.'}
+          : `Free plan: ${FREE_DAILY_LIMIT} paraphrases per day.`}
       </p>
 
       <div className="mt-6">

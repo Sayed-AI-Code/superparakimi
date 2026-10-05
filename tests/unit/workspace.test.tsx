@@ -11,6 +11,7 @@ import {
   USAGE_REFRESH_EVENT,
 } from '@/lib/workspace/helpers';
 import { MAX_INPUT_CHARS } from '@/lib/validation';
+import { FREE_DAILY_LIMIT } from '@/lib/quota/limit';
 
 const ENCODER = new TextEncoder();
 
@@ -561,5 +562,60 @@ describe('401 redirects to sign-in (spec §7)', () => {
     expect(window.location.href).toBe('/app');
     expect(navigations).toEqual([]);
     expect(screen.getByRole('alert').textContent).toContain('Resets');
+  });
+});
+
+describe('tagline never asserts a count it does not have (spec §7)', () => {
+  /** The sentence under the <h1> — Workspace's own, not the header meter. */
+  function tagline(): string {
+    const main = screen.getByRole('heading', { level: 1 }).parentElement;
+    return main?.querySelector('p')?.textContent?.trim() ?? '';
+  }
+
+  it('before usage arrives, states the plan allowance and no personal count', () => {
+    // Workspace alone: nothing has published usage yet, so there is no true
+    // remaining number for this visitor. The sentence must be about the PLAN.
+    render(<Workspace />);
+    const text = tagline();
+    expect(text).toContain(`Free plan: ${FREE_DAILY_LIMIT}`);
+    // The load-bearing half: no personal remaining claim, and no UTC reset
+    // promise on a screen that is supposed to render times locally.
+    expect(text).not.toMatch(/left today/i);
+    expect(text).not.toMatch(/midnight|UTC/i);
+    expect(document.querySelector('#usage-meter')).toBeNull();
+  });
+
+  it('once real usage arrives it shows the real numbers, not the placeholder', async () => {
+    // A visitor with 0 left must never be told "10 per day" while the page is
+    // claiming the count. UsageMeter's fetch publishes the real usage, which
+    // replaces the placeholder.
+    fetchMock.mockResolvedValue(
+      jsonResponse(usage({ used: 10, limit: 10, remaining: 0 })),
+    );
+    render(
+      <>
+        <UsageMeter />
+        <Workspace />
+      </>,
+    );
+
+    await waitFor(() => expect(tagline()).toBe('0 of 10 left today.'));
+    expect(tagline()).not.toMatch(/Free plan/i);
+  });
+
+  it('a failed usage read keeps the plan sentence, never a fabricated count', async () => {
+    fetchMock.mockRejectedValue(new Error('network down'));
+    render(
+      <>
+        <UsageMeter />
+        <Workspace />
+      </>,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const text = tagline();
+    expect(text).toContain(`Free plan: ${FREE_DAILY_LIMIT}`);
+    expect(text).not.toMatch(/left today/i);
   });
 });

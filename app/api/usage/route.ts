@@ -1,4 +1,5 @@
 import { auth } from '@/lib/auth';
+import { describeErrorForLog } from '@/lib/auth/log';
 import { check } from '@/lib/quota/quotaService';
 
 /**
@@ -10,7 +11,9 @@ import { check } from '@/lib/quota/quotaService';
  *
  * `remaining` is derived, not stored — QuotaStatus carries only `used` and
  * `limit`, so the subtraction lives here (and in the `done` SSE frame of
- * POST /api/paraphrase) rather than in a second source of truth.
+ * POST /api/paraphrase) rather than in a second source of truth. It is clamped
+ * at zero because `used` may exceed `limit` under a race the quota service
+ * explicitly accepts; the display never shows a negative.
  *
  * `resetsAt` leaves as the UTC instant the quota service computed (next UTC
  * midnight, ISO with Z). Converting it to the visitor's zone is a display
@@ -21,18 +24,52 @@ import { check } from '@/lib/quota/quotaService';
  * this endpoint cannot spend a user's day.
  */
 export async function GET(): Promise<Response> {
-  const session = await auth();
-  const userId = session?.user?.id;
-  if (!userId) {
-    return new Response(JSON.stringify({ error: 'Sign in to see your usage' }), {
-      status: 401,
-      headers: { 'content-type': 'application/json' },
-    });
-  }
+  // One id per request, generated before anything that can throw, so the
+  // `console.error` below and the body handed to the client carry the same
+  // value. Without it a visitor reporting "it broke at 14:02" cannot be joined
+  // to a log line (spec §7: correlation_id is returned in the error body).
+  const correlationId = crypto.randomUUID();
 
-  const { used, limit, resetsAt } = await check(userId);
-  return new Response(JSON.stringify({ used, limit, remaining: limit - used, resetsAt }), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
+  try {
+    const session = await auth();
+    const userId = session?.user?.id;
+    if (!userId) {
+      return new Response(JSON.stringify({ error: 'Sign in to see your usage' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    const { used, limit, resetsAt } = await check(userId);
+    return new Response(
+      JSON.stringify({
+        used,
+        limit,
+        // Clamped, not raw: quotaService documents an accepted race where two
+        // concurrent first-deltas both insert, so `used` can legitimately reach
+        // 11 against a limit of 10. The overcount is tolerated; the "-1 left
+        // today" it would render is a UI lie about a count nobody can have.
+        remaining: Math.max(0, limit - used),
+        resetsAt,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  } catch (error) {
+    // Route-level catch (spec §7). `describeErrorForLog` is the only thing
+    // that reaches the log — never the raw error, whose message or `.cause`
+    // can carry the connection string. Scope this honestly: check()'s query
+    // params are the userId alone, so there is no credential to leak here; the
+    // rule being honoured is the spec's catch clause, not a redaction fix.
+    console.error(
+      JSON.stringify({
+        event: 'usage.read.failed',
+        correlationId,
+        ...describeErrorForLog(error),
+      }),
+    );
+    return new Response(
+      JSON.stringify({ error: 'Could not read your usage — try again.', correlationId }),
+      { status: 500, headers: { 'content-type': 'application/json' } },
+    );
+  }
 }
