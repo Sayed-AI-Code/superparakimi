@@ -116,6 +116,49 @@ export function formatResetLocal(resetsAtIso: string): string {
 }
 
 /**
+ * Character counting and capping that agree with the server's zod schema.
+ *
+ * zod v4 `.max(n)` compares against CODE POINTS. `String.prototype.length` is
+ * UTF-16 UNITS, and `.slice()` cuts on them — so for any astral-plane
+ * character (emoji, CJK extension B+, musical symbols) the naive pair
+ * disagrees with the server in both directions: it trims text the server would
+ * have accepted, and it can strand a lone high surrogate at the cut, which
+ * zod happily accepts but an upstream tokenizer may reject. `Array.from`
+ * iterates code points, so these helpers count and cut the same units the
+ * schema does.
+ *
+ * The cap still falls on a code-point boundary, not a grapheme boundary: a
+ * combining mark or ZWJ sequence can be separated from its base character.
+ * That yields well-formed, sendable text, which is all the cap promises;
+ * `Intl.Segmenter` would be the upgrade if grapheme-exact counting matters.
+ */
+export function countChars(value: string): number {
+  if (typeof value !== 'string') return 0;
+  return Array.from(value).length;
+}
+
+export function capChars(
+  value: string,
+  max: number,
+): { text: string; truncated: boolean } {
+  if (typeof value !== 'string') return { text: '', truncated: false };
+  const chars = Array.from(value);
+  if (chars.length <= max) return { text: value, truncated: false };
+  return { text: chars.slice(0, max).join(''), truncated: true };
+}
+
+/**
+ * Makes a string safe to send: a lone surrogate (possible in a DOM value from
+ * a truncated paste or an autofill) becomes U+FFFD rather than travelling to
+ * the upstream, which may 400 on it. No-op on well-formed text.
+ */
+export function wellFormedText(value: string): string {
+  if (typeof value !== 'string') return '';
+  if (typeof value.isWellFormed !== 'function') return value;
+  return value.isWellFormed() ? value : value.toWellFormed();
+}
+
+/**
  * Window event names used to keep the two client components in sync.
  *
  * UsageMeter lives in app/layout.tsx and Workspace in app/app/page.tsx —

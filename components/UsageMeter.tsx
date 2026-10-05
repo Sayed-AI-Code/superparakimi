@@ -31,8 +31,11 @@ export default function UsageMeter() {
       fetch('/api/usage', { cache: 'no-store' })
         .then((res) => (res.ok ? (res.json() as Promise<Usage>) : null))
         .then((data) => {
-          // Publish rather than only set local state: Workspace lives in a
-          // different React tree and needs the same numbers to gate its button.
+          // 401 lands here as null and the meter simply renders nothing —
+          // a meter for a signed-out user has no true number to show.
+          // REDIRECTING is NOT this component's job: Workspace owns the 401
+          // redirect (spec §7), because it is the component with a user action
+          // behind it. Two components navigating is two ways to lose a race.
           if (!cancelled && data) publishUsage(data);
         })
         .catch(() => {
