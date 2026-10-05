@@ -2,27 +2,46 @@ import path from 'node:path';
 
 import { PGlite } from '@electric-sql/pglite';
 import { neon } from '@neondatabase/serverless';
+import { sql } from 'drizzle-orm';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import { drizzle as drizzleNeonHttp } from 'drizzle-orm/neon-http';
+import { drizzle as drizzleNodePg } from 'drizzle-orm/node-postgres';
+import { migrate as migrateNodePg } from 'drizzle-orm/node-postgres/migrator';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { migrate as migratePglite } from 'drizzle-orm/pglite/migrator';
+import { Pool } from 'pg';
 
 import * as schema from './schema';
 
 export * from './schema';
 
-// Common supertype of NeonHttpDatabase and PgliteDatabase (both extend
-// PgDatabase<HKT, TSchema>; in drizzle-orm 0.45 the HKT generic comes first).
+// Common supertype of NeonHttpDatabase, NodePgDatabase and PgliteDatabase —
+// in drizzle-orm 0.45 PgDatabase's first generic is the query-result HKT,
+// and each driver's HKT extends PgQueryResultHKT.
 export type DB = PgDatabase<PgQueryResultHKT, typeof schema>;
 
 const migrationsFolder = path.join(import.meta.dirname, '..', 'drizzle');
+
+export type TestBackend = 'node-postgres' | 'pglite';
+
+// Backend-selection seam for the test branch: CI provisions a real
+// postgres:16 service and sets DATABASE_URL_TEST (TCP via node-postgres);
+// local runs leave it unset and get in-process PGlite.
+export function selectTestBackend(databaseUrlTest: string | undefined): TestBackend {
+  return databaseUrlTest ? 'node-postgres' : 'pglite';
+}
 
 let dbPromise: Promise<DB> | null = null;
 
 async function createDb(): Promise<DB> {
   if (process.env.NODE_ENV === 'test') {
-    // Local tests run against in-process Postgres (PGlite), migrations applied
-    // once per process by the drizzle pglite migrator.
+    const testUrl = process.env.DATABASE_URL_TEST;
+    if (selectTestBackend(testUrl) === 'node-postgres') {
+      const pool = new Pool({ connectionString: testUrl });
+      const db = drizzleNodePg(pool, { schema });
+      await migrateNodePg(db, { migrationsFolder });
+      return db;
+    }
     const client = new PGlite();
     const db = drizzlePglite(client, { schema });
     await migratePglite(db, { migrationsFolder });
@@ -31,8 +50,13 @@ async function createDb(): Promise<DB> {
   return drizzleNeonHttp(neon(process.env.DATABASE_URL!), { schema });
 }
 
+// Memoized singleton. The memo is cleared on rejection so one transient
+// boot failure does not poison every later getDb() for the process.
 export function getDb(): Promise<DB> {
-  dbPromise ??= createDb();
+  dbPromise ??= createDb().catch((error: unknown) => {
+    dbPromise = null;
+    throw error;
+  });
   return dbPromise;
 }
 
@@ -42,6 +66,6 @@ export async function resetTestDb(): Promise<void> {
   }
   const db = await getDb();
   await db.execute(
-    'TRUNCATE TABLE users, accounts, sessions, verification_tokens, usage_events RESTART IDENTITY CASCADE',
+    sql`TRUNCATE TABLE users, accounts, sessions, verification_tokens, usage_events RESTART IDENTITY CASCADE`,
   );
 }

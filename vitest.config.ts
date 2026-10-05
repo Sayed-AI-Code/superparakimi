@@ -5,11 +5,9 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/unit/**/*.test.ts'],
-    env: {
-      DATABASE_URL_TEST:
-        process.env.DATABASE_URL_TEST ??
-        'postgresql://postgres:postgres@localhost:5432/superparakimi_test',
-    },
+    // DATABASE_URL_TEST deliberately NOT defaulted here: its presence is
+    // the selector for the real-Postgres (CI) backend in getDb(); local
+    // runs leave it unset and get in-process PGlite.
   },
   resolve: {
     alias: {
