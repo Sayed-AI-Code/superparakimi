@@ -7,21 +7,7 @@ import {
   GOOGLE_ONLY_SIGN_IN_CODE,
   GOOGLE_ONLY_SIGN_IN_MESSAGE,
 } from '@/lib/auth';
-
-// callbackUrl arrives from the proxy (absolute, same-origin) or a crafted
-// link: keep only same-origin paths, never protocol-relative ones.
-function safeRedirectTarget(raw: string | undefined): string {
-  if (!raw) return '/app';
-  let path = raw;
-  try {
-    const url = new URL(raw);
-    path = `${url.pathname}${url.search}`;
-  } catch {
-    // Not absolute — treat as a path below.
-  }
-  if (!path.startsWith('/') || path.startsWith('//')) return '/app';
-  return path;
-}
+import { safeRedirectTarget } from '@/lib/auth/redirect';
 
 function notice(
   err: string | undefined,

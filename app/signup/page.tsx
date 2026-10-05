@@ -34,7 +34,14 @@ export default async function SignUpPage(props: PageProps<'/signup'>) {
             const result = await signUpWithEmail({
               email: String(formData.get('email') ?? ''),
               password: String(formData.get('password') ?? ''),
-            }).catch(() => ({ error: 'Something went wrong. Please try again.' }));
+            }).catch((error: unknown) => {
+              // signUpWithEmail rethrows unexpected failures (everything but
+              // duplicate-email) so they are never anonymous: log the
+              // error's message + stack server-side, render a generic
+              // string to the user. Credentials never reach the log.
+              console.error('[signup] signUpWithEmail failed', error);
+              return { error: 'Something went wrong. Please try again.' };
+            });
             if ('error' in result) {
               redirect(`/signup?error=${encodeURIComponent(result.error)}`);
             }

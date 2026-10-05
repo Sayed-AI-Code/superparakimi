@@ -4,7 +4,7 @@ import { CredentialsSignin } from 'next-auth';
 
 import { getDb, resetTestDb, users } from '@/db';
 import { signUpWithEmail } from '@/lib/auth/signup';
-import { authorize, GOOGLE_ONLY_SIGN_IN_CODE, GOOGLE_ONLY_SIGN_IN_MESSAGE } from '@/lib/auth';
+import { authorize } from '@/lib/auth';
 
 const EMAIL = 'alice@example.com';
 const PASSWORD = 'hunter2-horse';
@@ -72,9 +72,12 @@ describe('credentials authorize (password sign-in)', () => {
 
     const promise = authorize({ email: 'google-only@example.com', password: 'whatever' });
     await expect(promise).rejects.toBeInstanceOf(CredentialsSignin);
-    await expect(promise).rejects.toThrow(GOOGLE_ONLY_SIGN_IN_MESSAGE);
+    // Asserted against the spec'd literals — not the lib/auth.ts constants
+    // that produced them — so renaming those constants cannot silently
+    // regress the user-facing contract.
+    await expect(promise).rejects.toThrow('This account uses Google sign-in');
     await promise.catch((error: unknown) => {
-      expect((error as CredentialsSignin).code).toBe(GOOGLE_ONLY_SIGN_IN_CODE);
+      expect((error as CredentialsSignin).code).toBe('google_only');
     });
   });
 
