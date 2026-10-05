@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: Typecheck, lint & unit tests
+    name: Typecheck, lint & tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -24,6 +24,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
+      # DATABASE_URL_TEST being set is itself the selector: it picks the
+      # node-postgres backend in db/index.ts (selectTestBackend), so CI runs
+      # against a real postgres:16 and a local clone without it falls back to
+      # in-process PGlite. Nothing else needs to know which CI is which.
       DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/superparakimi_test
     steps:
       - uses: actions/checkout@v4
@@ -38,18 +42,6 @@ jobs:
       - run: npm run lint
       - run: npm run test
 
-  e2e:
-    name: Playwright (wired in Task 12)
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run test
-      # Placeholder gate until the Playwright specs land in Task 12,
-      # where `npm run test:e2e` replaces the build step.
-      - run: npm run build
+  # The smoke lives in its own workflow (e2e.yml): it needs a browser install,
+  # a build, and a production-mode server, which is a different cost profile and
+  # a different failure vocabulary from this suite.
