@@ -76,7 +76,10 @@ async function remainingFor(userId: string): Promise<number> {
   return status.limit - status.used;
 }
 
-function sseResponse(chunks: AsyncGenerator<Uint8Array>): Response {
+function sseResponse(
+  chunks: AsyncGenerator<Uint8Array>,
+  onCancel?: () => Promise<void>,
+): Response {
   return new Response(
     new ReadableStream<Uint8Array>({
       async pull(controller) {
@@ -88,9 +91,13 @@ function sseResponse(chunks: AsyncGenerator<Uint8Array>): Response {
         controller.enqueue(next.value);
       },
       async cancel() {
-        // Consumer went away: release THIS generator, whose `finally` in turn
-        // releases the provider's iterator and terminalizes the usage row.
+        // Release THIS generator first; its `finally` terminalizes the row and
+        // releases the provider iterator. Then run onCancel, because if the
+        // consumer abandons BEFORE the first read the generator never began —
+        // .return() on an unstarted generator runs no body and no finally, so
+        // teardown has to happen out here too.
         await chunks.return(undefined);
+        await onCancel?.();
       },
     }),
     {
@@ -145,10 +152,14 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
 
       // Abuse control, NOT quota: a rate-limit denial consumes no quota and
       // writes no usageEvents row. The session is guaranteed by the 401 gate
-      // above, so this is always the authenticated limit; anonymous traffic is
-      // rejected before it reaches this handler and is rate-limited at the
-      // edge instead (see proxy.ts), which is what makes the spec's anonymous
-      // 10 req/min on /api/* real.
+      // above, so this is always the authenticated limit.
+      //
+      // NOT IMPLEMENTED TODAY: the spec's 10 req/min ANONYMOUS limit on
+      // /api/* has no enforcement point. proxy.ts matches only /app and
+      // /account, and anonymous traffic is 401'd here before it can reach any
+      // limiter. Do not read that as handled — it is owned by Task 12 (edge
+      // matcher + checkRate in proxy.ts, or Vercel WAF) and is a known
+      // deploy-readiness gap.
       const rate = checkRate(clientIp(request), AUTHED_LIMIT_60S, RATE_WINDOW_MS);
       if (!rate.allowed) {
         return jsonError(
@@ -256,15 +267,28 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
       }
       const billedId = eventId;
 
+      // Settlement is hoisted OUT of the generator on purpose. The row is
+      // already billed at this point, and a consumer that cancels before the
+      // first read closes a generator that never began — no body, no finally.
+      // Teardown therefore cannot depend on the generator ever starting.
+      // Idempotent, so every exit path can call it without double-writing.
+      let settled = false;
+      async function settle(): Promise<void> {
+        if (settled) return;
+        settled = true;
+        try {
+          await abortUsage(billedId);
+        } finally {
+          // Release upstream even if the row update threw.
+          await iterator.return?.();
+        }
+      }
+
       return sseResponse(
         (async function* () {
-          let settled = false;
           try {
-            // The first delta yield must be INSIDE the try/finally. If it
-            // sits outside, a consumer that cancels after reading delta one
-            // leaves the generator suspended before the try block, .return()
-            // exits without running the finally, and the row is stranded in
-            // `streaming` while still holding the user's quota.
+            // The first delta yield must be INSIDE the try, so a consumer that
+            // cancels after reading delta one still lands in the finally.
             yield sse({ type: 'delta', text: firstDelta });
             for (;;) {
               const next = await iterator.next();
@@ -274,19 +298,18 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
               yield sse({ type: 'delta', text: next.value });
             }
             if (request.signal.aborted) {
-              await abortUsage(billedId);
-              settled = true;
+              await settle();
               yield sse({ type: 'error', message: CANCELLED_MESSAGE });
               return;
             }
             await completeUsage(billedId, totalChars);
+            // Billed as completed: the settle in `finally` must not overwrite
+            // the terminal status, so mark it settled before releasing upstream.
             settled = true;
+            await iterator.return?.();
             yield sse({ type: 'done', remaining: await remainingFor(userId) });
           } catch (error) {
-            if (!settled) {
-              await abortUsage(billedId);
-              settled = true;
-            }
+            await settle();
             console.error('[paraphrase] stream failed', {
               correlationId: crypto.randomUUID(),
               billedId,
@@ -302,16 +325,12 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
                   : GENERIC_STREAM_MESSAGE;
             yield sse({ type: 'error', message });
           } finally {
-            // An abandoned consumer — reader.cancel(), navigation away, dead
-            // socket — resumes the generator at the pending `yield` via
-            // .return() and never runs `catch`. This is therefore the only
-            // place that can terminalize the row: without it the row stays
-            // `streaming` forever while still consuming the user's quota, and
-            // the provider's upstream request is never released.
-            if (!settled) await abortUsage(billedId);
-            await iterator.return?.();
+            // Any remaining exit — abandonment, throw inside catch, early
+            // return — terminalizes the row and releases upstream exactly once.
+            await settle();
           }
         })(),
+        settle,
       );
     },
   };

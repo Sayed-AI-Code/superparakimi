@@ -511,4 +511,32 @@ describe('POST /api/paraphrase — failure paths', () => {
     // Quota stays consumed: text was already delivered and billed.
     expect((await check(userId)).used).toBe(1);
   });
+
+  it('a consumer that cancels BEFORE the first read still terminalizes the row', async () => {
+    // The generator never begins on this path, so .return() runs no body and
+    // no finally — teardown has to be driven from the stream's cancel() itself.
+    let iteratorReturned = false;
+    const route = makeRouteHandler({
+      provider: {
+        stream: () =>
+          (async function* () {
+            try {
+              yield 'never-read';
+            } finally {
+              iteratorReturned = true;
+            }
+          })(),
+      } as ParaphraseProvider,
+    });
+
+    const res = await route.POST(fakeReq(PAYLOAD));
+    const reader = res.body!.getReader();
+    await reader.cancel();
+
+    const rows = await rowsFor(userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('aborted');
+    expect(iteratorReturned).toBe(true);
+    expect((await check(userId)).used).toBe(1);
+  });
 });
