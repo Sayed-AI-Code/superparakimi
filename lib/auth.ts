@@ -1,12 +1,13 @@
 import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import { eq } from 'drizzle-orm';
-import NextAuth, { CredentialsSignin } from 'next-auth';
+import NextAuth, { CredentialsSignin, type NextAuthConfig } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 import Google from 'next-auth/providers/google';
 import { z } from 'zod';
 
 import { accounts, getDb, users } from '@/db';
 import { authConfig } from '@/lib/auth.config';
+import { stampEmailVerifiedFromProfile } from '@/lib/auth/email-verified';
 import { verifyPassword } from '@/lib/auth/passwords';
 
 // Shown on /signin when a password-less (Google-only) account submits the
@@ -51,7 +52,7 @@ export async function authorize(credentials: Record<string, unknown> | undefined
 // Lazy config: our getDb() singleton resolves asynchronously (migrations),
 // while DrizzleAdapter needs a live drizzle instance — so build the adapter
 // per first auth call, not at module scope.
-export const { handlers, auth, signIn, signOut } = NextAuth(async () => {
+export async function buildAuthConfig(): Promise<NextAuthConfig> {
   const db = await getDb();
   return {
     ...authConfig,
@@ -77,5 +78,38 @@ export const { handlers, auth, signIn, signOut } = NextAuth(async () => {
         authorize,
       }),
     ],
+    callbacks: {
+      // Spread first: authConfig carries `authorized` and `session`, and a
+      // callbacks object here that omitted them would silently displace both
+      // — losing the proxy's redirect rule is the exact class of bug that
+      // took the `export const proxy = auth(async …)` form down.
+      ...authConfig.callbacks,
+      // Persist the verification a provider asserted but Auth.js discards for
+      // new OAuth users. Must live here and not in authConfig: authConfig is
+      // dependency-free so proxy.ts never pulls in the Drizzle adapter or the
+      // database, and this writes to the database.
+      //
+      // Always returns true — a bookkeeping write, not a gate. The credentials
+      // provider has no profile, so `email_verified` is undefined there and
+      // the stamp is a no-op for password sign-ins.
+      //
+      // AWAITED. Fire-and-forget here would be the same mistake as an
+      // un-awaited cleanup in the rate limiter: a serverless function may
+      // freeze the instant it returns its response, and the row would stay
+      // false as often as not. Awaiting is safe rather than risky precisely
+      // because stampEmailVerifiedFromProfile catches and logs its own
+      // database errors — it cannot reject, so it cannot fail a sign-in.
+      async signIn({ account, profile }) {
+        await stampEmailVerifiedFromProfile({
+          provider: account?.provider ?? 'unknown',
+          email: typeof profile?.email === 'string' ? profile.email : undefined,
+          emailVerified:
+            (profile as { email_verified?: unknown } | undefined)?.email_verified === true,
+        });
+        return true;
+      },
+    },
   };
-});
+}
+
+export const { handlers, auth, signIn, signOut } = NextAuth(buildAuthConfig);
