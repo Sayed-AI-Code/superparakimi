@@ -1,3 +1,9 @@
+# superparakimi
+
+Paraphrasing with a daily free quota: email or Google sign-in, streaming generation, and honest billing when a request fails.
+
+Deployed at [superparakimi.vercel.app](https://superparakimi.vercel.app). Built with Next.js 16, Auth.js v5, Drizzle and Neon Postgres; generated text is streamed from OpenRouter.
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
