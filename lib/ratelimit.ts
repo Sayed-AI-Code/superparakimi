@@ -2,7 +2,7 @@
 // serverless instances. Falls back to a process-local window when no database
 // is reachable — see apiRateLimit. Runtime-agnostic (no node: APIs).
 
-import { sql } from 'drizzle-orm';
+import { lt, sql } from 'drizzle-orm';
 
 import { getDb, rateLimitBuckets } from '@/db';
 import type { DB } from '@/db';
@@ -11,6 +11,15 @@ import { describeErrorForLog } from '@/lib/auth/log';
 export const ANON_LIMIT_60S = 10;
 export const AUTHED_LIMIT_60S = 30;
 export const RATE_WINDOW_MS = 60_000;
+
+/**
+ * How many expired windows a bucket row survives, swept by sharedCheckRate.
+ * Ten minutes of history is enough to answer "what was this caller doing a few
+ * minutes ago" from the database, and bounds the table at roughly
+ * (active callers) x RETENTION_WINDOWS rather than one row per caller per
+ * minute forever.
+ */
+export const RETENTION_WINDOWS = 10;
 
 // Single source for the denial copy, so every rate-limited route says exactly
 // the same sentence and a copy change is one edit.
@@ -120,6 +129,30 @@ export async function sharedCheckRate(
       retryAfterSec: Math.ceil((windowStart + windowMs - now) / 1000),
     };
   }
+
+  // Housekeeping, paid for by the caller that created this row.
+  //
+  // Postgres has no row TTL and Neon's free tier gives no cron, so without
+  // this sweep the table grows one row per caller per minute forever — it
+  // never affects correctness, which is exactly why it is the kind of leak
+  // that survives review, and it is the reason rate_limit_buckets carries its
+  // own index on window_start.
+  //
+  // `count === 1` is the signal that THIS statement created the row rather
+  // than incremented it: an insert starts at 1, and any DO UPDATE yields
+  // count + 1 >= 2, so exactly one racing caller pays for the cleanup and the
+  // common request path still costs one statement. Awaited, not
+  // fire-and-forget — a serverless function may freeze the instant it returns
+  // its response, and an un-awaited DELETE is a cleanup that quietly never
+  // runs.
+  if (taken[0].count === 1) {
+    await db
+      .delete(rateLimitBuckets)
+      .where(
+        lt(rateLimitBuckets.windowStart, windowStart - RETENTION_WINDOWS * windowMs),
+      );
+  }
+
   return { allowed: true, retryAfterSec: 0 };
 }
 
