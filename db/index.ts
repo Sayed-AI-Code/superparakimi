@@ -228,6 +228,6 @@ export async function resetTestDb(): Promise<void> {
   }
   const db = await getDb();
   await db.execute(
-    sql`TRUNCATE TABLE users, accounts, sessions, verification_tokens, usage_events RESTART IDENTITY CASCADE`,
+    sql`TRUNCATE TABLE users, accounts, sessions, verification_tokens, usage_events, rate_limit_buckets RESTART IDENTITY CASCADE`,
   );
 }

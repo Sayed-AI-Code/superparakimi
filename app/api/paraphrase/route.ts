@@ -9,7 +9,7 @@ import {
   check,
   completeUsage,
 } from '@/lib/quota/quotaService';
-import { apiRateLimit } from '@/lib/ratelimit';
+import { apiRateLimit, rateLimitDb } from '@/lib/ratelimit';
 import { paraphraseRequestSchema } from '@/lib/validation';
 
 // zod caps the TRIMMED text, so leading/trailing whitespace stays unbounded
@@ -144,7 +144,7 @@ export function makeRouteHandler({ provider }: { provider: ParaphraseProvider })
       // unlimited 401s for free. 10/min anonymous, 30/min authenticated.
       // Abuse control, NOT quota — a denial here consumes no quota and writes
       // no usage_events row.
-      const limited = apiRateLimit(request);
+      const limited = await apiRateLimit(request, await rateLimitDb());
       if (limited) return limited;
 
       const session = await auth();

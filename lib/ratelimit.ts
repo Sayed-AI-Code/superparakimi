@@ -1,6 +1,12 @@
-// Process-local fixed-window rate limiter; runtime-agnostic (no node: APIs).
-// Enforced in the /api/* route handlers, not proxy.ts — see apiRateLimit for
-// why the proxy cannot host it.
+// Rate limiting for /api/*, backed by Postgres so the count is true across
+// serverless instances. Falls back to a process-local window when no database
+// is reachable — see apiRateLimit. Runtime-agnostic (no node: APIs).
+
+import { sql } from 'drizzle-orm';
+
+import { getDb, rateLimitBuckets } from '@/db';
+import type { DB } from '@/db';
+import { describeErrorForLog } from '@/lib/auth/log';
 
 export const ANON_LIMIT_60S = 10;
 export const AUTHED_LIMIT_60S = 30;
@@ -41,39 +47,119 @@ export function hasSessionCookie(request: { headers: Headers }): boolean {
 }
 
 /**
- * The whole per-IP rate-limit decision for one API request, pure.
+ * Which bucket a request belongs to, and how large that bucket is. One source
+ * of truth for the bucket name so the in-memory and Postgres paths cannot
+ * disagree about who a caller is — if they did, a caller would get a fresh
+ * budget simply by the store being chosen differently.
  *
- * Lives here rather than in proxy.ts because the proxy cannot host it: the
- * only way to run custom logic there is `export const proxy = auth(async …)`,
- * and that wrapper form was measured to bypass authConfig.callbacks.authorized
- * — `/app` answered 200 and `/account` 500 to anonymous visitors instead of
- * the 307 the callback mandates. `export { auth as proxy }` is the form that
- * enforces authorization, so it stays, and the limiter moves to the route
- * handlers, which is the other place that sees every `/api/*` request.
- *
- * Split decision/Response so the anonymous-vs-authed branching is testable
- * without a Next runtime: rateLimitDecision is arithmetic, apiRateLimit only
- * renders it.
+ * Anonymous-vs-authenticated is decided on the cookie alone, never by waiting
+ * for a JWT check: this brake has to run ahead of the 401 gate or anonymous
+ * callers collect unlimited 401s for free.
  */
-export function rateLimitDecision(headers: Headers): {
-  allowed: boolean;
-  retryAfterSec: number;
-  limit: number;
-} {
+export function rateLimitBucket(headers: Headers): { key: string; limit: number } {
   const anonymous = !hasSessionCookie({ headers });
-  const limit = anonymous ? ANON_LIMIT_60S : AUTHED_LIMIT_60S;
-  const rate = checkRate(
-    `${anonymous ? 'anon' : 'auth'}:${clientIp({ headers })}`,
-    limit,
-    RATE_WINDOW_MS,
-  );
-  return { ...rate, limit };
+  return {
+    key: `${anonymous ? 'anon' : 'auth'}:${clientIp({ headers })}`,
+    limit: anonymous ? ANON_LIMIT_60S : AUTHED_LIMIT_60S,
+  };
+}
+
+/**
+ * The shared-window check: atomically take one slot in `key`'s current fixed
+ * window, and answer from the number the database actually stored.
+ *
+ * This is the fix for the limiter that was not. A process-local Map counts
+ * requests per instance, so on Vercel — where these handlers are default Node
+ * serverless functions, unpinned — the enforced limit is however many instances
+ * happen to be warm, times the documented number, and it resets on every cold
+ * start. Here the counter is one row, and every instance increments the same
+ * row, so "10 per minute" means ten.
+ *
+ * ONE round trip, and it has to be that way: the increment and the read cannot
+ * be separate statements. Two callers that both read 9 and both write 10 would
+ * each believe they were the tenth; the `ON CONFLICT ... DO UPDATE ...
+ * RETURNING count` form makes Postgres serialize the write on the row and hand
+ * each caller its own distinct position in the queue. Transactions are not an
+ * option — the Neon HTTP driver throws `No transactions support in neon-http
+ * driver` (node_modules/drizzle-orm/neon-http/session.cjs) — so the atomicity
+ * has to live inside the single statement.
+ *
+ * The `WHERE count < limit` guard means a denial writes nothing: the row
+ * holds "requests taken", never "requests attempted", and stops at the limit
+ * instead of running away past it. No row returned therefore means denied,
+ * which is also why the denied branch does not need to read the count back —
+ * the window is epoch-aligned, so the time until it refills is arithmetic
+ * against `now` alone.
+ */
+export async function sharedCheckRate(
+  db: DB,
+  key: string,
+  limit: number,
+  windowMs: number,
+  now: number = Date.now(),
+): Promise<{ allowed: boolean; retryAfterSec: number }> {
+  const windowStart = Math.floor(now / windowMs) * windowMs;
+
+  // The table name has to come from the query builder, not from a template
+  // hole: `${rateLimitBuckets.name}` inside sql`` binds "rate_limit_buckets"
+  // as a VALUE and generates `SET count = 'rate_limit_buckets'.count + 1`,
+  // which is a syntax error at best and a silent no-op at worst.
+  const taken = await db
+    .insert(rateLimitBuckets)
+    .values({ bucketKey: key, windowStart, count: 1 })
+    .onConflictDoUpdate({
+      target: [rateLimitBuckets.bucketKey, rateLimitBuckets.windowStart],
+      set: { count: sql`${rateLimitBuckets.count} + 1` },
+      setWhere: sql`${rateLimitBuckets.count} < ${limit}`,
+    })
+    .returning({ count: rateLimitBuckets.count });
+
+  if (taken.length === 0) {
+    return {
+      allowed: false,
+      retryAfterSec: Math.ceil((windowStart + windowMs - now) / 1000),
+    };
+  }
+  return { allowed: true, retryAfterSec: 0 };
+}
+
+/**
+ * Resolve the shared store once per process.
+ *
+ * Returns null rather than throwing. A limiter that fails the request when its
+ * own store is down has turned a slow database into an outage, which is a worse
+ * failure than the abuse it prevents — so a Neon hiccup logs and degrades to
+ * the per-instance window, and the site keeps serving. Fail-open is the
+ * deliberate trade-off here, stated plainly: while the store is unreachable the
+ * limit is only per-instance again, exactly the behaviour before this fix. The
+ * quota (10/day) is not relaxed by it — that is enforced separately, by
+ * quotaService, against the same database.
+ */
+let sharedDb: Promise<DB | null> | null = null;
+
+export function rateLimitDb(): Promise<DB | null> {
+  sharedDb ??= getDb().catch((error: unknown) => {
+    sharedDb = null;
+    console.error(
+      JSON.stringify({
+        event: 'ratelimit.store.unavailable',
+        fallback: 'in-memory',
+        ...describeErrorForLog(error),
+      }),
+    );
+    return null;
+  });
+  return sharedDb;
 }
 
 /**
  * The `/api/*` guard from the spec's global constraints: 10 req/min
  * anonymous, 30 req/min authenticated. Returns the 429 to hand back, or null
  * to let the request through.
+ *
+ * Reads the count from the shared Postgres store when one is reachable, and
+ * from the process-local window otherwise — including when the caller
+ * deliberately passes `null`, which is how a test says "exercise the fallback".
  *
  * Read literally, one bucket per caller rather than one per route: an
  * anonymous visitor who spends their 10 on /api/usage polling is also blocked
@@ -88,17 +174,33 @@ export function rateLimitDecision(headers: Headers): {
  * worthless if it excluded it — but the first person to rate-limit themselves
  * through Google OAuth will report it as a bug in the login, not as the brake
  * working.
+ *
+ * Cost, named: one extra Postgres round trip on every `/api/*` request. On the
+ * Neon free tier and at this traffic that is noise next to a paraphrase stream,
+ * and it is the price of a limit that is actually enforced.
  */
-export function apiRateLimit(request: { headers: Headers }): Response | null {
-  const decision = rateLimitDecision(request.headers);
-  if (decision.allowed) return null;
+export async function apiRateLimit(
+  request: { headers: Headers },
+  // No default: omitting the store silently reintroduces the per-instance
+  // bug this file exists to fix, so every caller has to say which store it
+  // means. Pass `await rateLimitDb()` in routes (shared, degrades to
+  // in-memory when the database is unreachable); pass `null` in a test that
+  // wants the pure arithmetic without a database.
+  db: DB | null,
+): Promise<Response | null> {
+  const { key, limit } = rateLimitBucket(request.headers);
+  const rate = db
+    ? await sharedCheckRate(db, key, limit, RATE_WINDOW_MS)
+    : checkRate(key, limit, RATE_WINDOW_MS);
+
+  if (rate.allowed) return null;
   return new Response(
-    JSON.stringify({ error: RATE_LIMIT_MESSAGE, retryAfterSec: decision.retryAfterSec }),
+    JSON.stringify({ error: RATE_LIMIT_MESSAGE, retryAfterSec: rate.retryAfterSec }),
     {
       status: 429,
       headers: {
         'content-type': 'application/json',
-        'retry-after': String(decision.retryAfterSec),
+        'retry-after': String(rate.retryAfterSec),
       },
     },
   );

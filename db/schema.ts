@@ -1,7 +1,9 @@
 import {
+  bigint,
   index,
   integer,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -83,4 +85,44 @@ export const usageEvents = pgTable(
   },
   // Quota checks (10/day free tier) aggregate by (user, UTC day).
   (t) => [index('usage_events_user_id_created_at_idx').on(t.userId, t.createdAt)],
+);
+
+/**
+ * Shared per-caller request counters, one row per (bucket, fixed window).
+ *
+ * This table exists because the process-local Map in lib/ratelimit.ts cannot
+ * work where the app is deployed. Vercel runs the /api/* handlers as default
+ * Node serverless functions with no pinning and no vercel.json, so every warm
+ * Lambda holds its own copy of that Map and a cold start empties it: ten
+ * instances mean a caller can spend ten times the documented limit. Putting
+ * the count in Postgres makes it one number that every instance reads and
+ * writes, which is the only shape of "10 requests per minute" that is true
+ * across instances.
+ *
+ * window_start is the epoch-aligned start of the window
+ * (floor(now / RATE_WINDOW_MS) * RATE_WINDOW_MS), stored as a bigint so the
+ * primary key is the whole identity of a window and an expired window can
+ * never be mistaken for a live one by a caller with a skewed clock. It is a
+ * fixed rather than a sliding window: the quota refills all at once on the
+ * minute boundary, and the cost of that is a caller who can double-burst
+ * across two adjacent boundaries. Accepted — a sliding window needs either a
+ * timestamped list per caller or sorted-set infrastructure, and this is an
+ * abuse brake, not a wall.
+ *
+ * A denial writes nothing, so `count` always means "requests taken in this
+ * window" and never exceeds the limit it was measured against.
+ */
+export const rateLimitBuckets = pgTable(
+  'rate_limit_buckets',
+  {
+    bucketKey: text('bucket_key').notNull(),
+    windowStart: bigint('window_start', { mode: 'number' }).notNull(),
+    count: integer('count').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bucketKey, t.windowStart] }),
+    // Pruning sweeps by age across every bucket; the composite PK above is
+    // useless for that query because window_start is not its leading column.
+    index('rate_limit_buckets_window_start_idx').on(t.windowStart),
+  ],
 );

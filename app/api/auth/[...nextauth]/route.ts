@@ -1,7 +1,7 @@
 import type { NextRequest } from 'next/server';
 
 import { handlers } from '@/lib/auth';
-import { apiRateLimit } from '@/lib/ratelimit';
+import { apiRateLimit, rateLimitDb } from '@/lib/ratelimit';
 
 /**
  * The Auth.js catch-all, wrapped in the per-IP brake.
@@ -31,9 +31,11 @@ import { apiRateLimit } from '@/lib/ratelimit';
 const { GET: authGet, POST: authPost } = handlers;
 
 export async function GET(request: NextRequest): Promise<Response> {
-  return apiRateLimit(request) ?? authGet(request);
+  const limited = await apiRateLimit(request, await rateLimitDb());
+  return limited ?? authGet(request);
 }
 
 export async function POST(request: NextRequest): Promise<Response> {
-  return apiRateLimit(request) ?? authPost(request);
+  const limited = await apiRateLimit(request, await rateLimitDb());
+  return limited ?? authPost(request);
 }

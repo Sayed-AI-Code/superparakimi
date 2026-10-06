@@ -6,8 +6,21 @@ import {
   apiRateLimit,
   checkRate,
   clientIp,
-  rateLimitDecision,
+  rateLimitBucket,
 } from '@/lib/ratelimit';
+
+/**
+ * The in-memory window — the fallback `apiRateLimit` uses when no database is
+ * reachable, and the arithmetic both paths share.
+ *
+ * Every call here passes `db: null` explicitly. That is not laziness: passing
+ * a real store would route these through Postgres and leave the fallback
+ * untested, and omitting the argument is a type error on purpose, so a caller
+ * cannot get the weak per-instance window without saying so. The shared-store
+ * behaviour — one counter that survives across serverless instances, and the
+ * atomic UPSERT that makes 10 a hard number under concurrency — is proven in
+ * tests/integration/ratelimit-shared.test.ts, not here.
+ */
 
 const WINDOW_60S = 60_000;
 
@@ -18,6 +31,10 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
 });
+
+function req(init: Record<string, string> = {}) {
+  return { headers: new Headers(init) };
+}
 
 describe('rate limit constants', () => {
   it('ANON_LIMIT_60S is 10 and AUTHED_LIMIT_60S is 30', () => {
@@ -99,72 +116,54 @@ describe('checkRate: key isolation', () => {
   });
 });
 
-function headers(init: Record<string, string> = {}) {
-  return new Headers(init);
-}
-
-describe('rateLimitDecision (route-level classification)', () => {
+describe('rateLimitBucket (which bucket, and how big)', () => {
   it('classifies by session cookie, not by path', () => {
-    expect(rateLimitDecision(headers({ cookie: 'authjs.session-token=abc' })).limit).toBe(
+    expect(rateLimitBucket(new Headers({ cookie: 'authjs.session-token=abc' })).limit).toBe(
       AUTHED_LIMIT_60S,
     );
     expect(
-      rateLimitDecision(headers({ cookie: '__Host-authjs.session-token=abc' })).limit,
+      rateLimitBucket(new Headers({ cookie: '__Host-authjs.session-token=abc' })).limit,
     ).toBe(AUTHED_LIMIT_60S);
-    expect(rateLimitDecision(headers()).limit).toBe(ANON_LIMIT_60S);
-    expect(rateLimitDecision(headers({ cookie: 'other=1' })).limit).toBe(
-      ANON_LIMIT_60S,
-    );
+    expect(rateLimitBucket(new Headers()).limit).toBe(ANON_LIMIT_60S);
+    expect(rateLimitBucket(new Headers({ cookie: 'other=1' })).limit).toBe(ANON_LIMIT_60S);
   });
 
-  it('blocks an anonymous caller at the 11th hit of the window', () => {
-    const ip = `198.51.100.${crypto.randomUUID().slice(0, 2)}`;
-    const h = headers({ 'x-forwarded-for': ip });
-    for (let i = 0; i < ANON_LIMIT_60S; i++) {
-      expect(rateLimitDecision(h).allowed).toBe(true);
-    }
-    const blocked = rateLimitDecision(h);
-    expect(blocked.allowed).toBe(false);
-    expect(blocked.retryAfterSec).toBeGreaterThan(0);
-    expect(blocked.limit).toBe(ANON_LIMIT_60S);
-  });
-
-  it('anonymous exhaustion does not throttle an authenticated caller on the same IP', () => {
-    const ip = `203.0.113.${crypto.randomUUID().slice(0, 2)}`;
-    for (let i = 0; i < ANON_LIMIT_60S + 5; i++) {
-      rateLimitDecision(headers({ 'x-forwarded-for': ip }));
-    }
-    const authed = rateLimitDecision(
-      headers({ 'x-forwarded-for': ip, cookie: 'authjs.session-token=abc' }),
-    );
-    expect(authed.allowed).toBe(true);
+  it('names the bucket by class and ip, so the two stores count the same caller', () => {
+    expect(rateLimitBucket(new Headers({ 'x-forwarded-for': '203.0.113.7' }))).toEqual({
+      key: 'anon:203.0.113.7',
+      limit: ANON_LIMIT_60S,
+    });
+    expect(
+      rateLimitBucket(
+        new Headers({ 'x-forwarded-for': '203.0.113.7', cookie: 'authjs.session-token=abc' }),
+      ),
+    ).toEqual({ key: 'auth:203.0.113.7', limit: AUTHED_LIMIT_60S });
   });
 
   it('clientIp takes the first forwarded hop', () => {
-    expect(clientIp({ headers: headers({ 'x-forwarded-for': '203.0.113.7, 70.41.3.18' }) })).toBe(
+    expect(clientIp({ headers: new Headers({ 'x-forwarded-for': '203.0.113.7, 70.41.3.18' }) })).toBe(
       '203.0.113.7',
     );
-    expect(clientIp({ headers: headers({ 'x-forwarded-for': ' 203.0.113.8 ,10.0.0.1' }) })).toBe(
+    expect(clientIp({ headers: new Headers({ 'x-forwarded-for': ' 203.0.113.8 ,10.0.0.1' }) })).toBe(
       '203.0.113.8',
     );
-    expect(clientIp({ headers: headers() })).toBe('unknown');
+    expect(clientIp({ headers: new Headers() })).toBe('unknown');
   });
 });
 
-describe('apiRateLimit (the 429 the routes hand back)', () => {
-  it('returns null while the caller is inside the budget', () => {
+describe('apiRateLimit on the in-memory fallback', () => {
+  it('returns null while the caller is inside the budget', async () => {
     const ip = `203.0.113.${crypto.randomUUID().slice(0, 2)}`;
-    const request = { headers: headers({ 'x-forwarded-for': ip }) };
-    expect(apiRateLimit(request)).toBeNull();
+    expect(await apiRateLimit(req({ 'x-forwarded-for': ip }), null)).toBeNull();
   });
 
   it('answers 429 with JSON, the pinned copy, and retry-after once exhausted', async () => {
     const ip = `198.51.100.${crypto.randomUUID().slice(0, 2)}`;
-    const request = { headers: headers({ 'x-forwarded-for': ip }) };
+    const request = req({ 'x-forwarded-for': ip });
     for (let i = 0; i < ANON_LIMIT_60S; i++) {
-      expect(apiRateLimit(request)).toBeNull();
+      expect(await apiRateLimit(request, null)).toBeNull();
     }
-    const blocked = apiRateLimit(request);
+    const blocked = await apiRateLimit(request, null);
     expect(blocked).not.toBeNull();
     expect(blocked!.status).toBe(429);
     expect(blocked!.headers.get('content-type')).toBe('application/json');
@@ -175,13 +174,14 @@ describe('apiRateLimit (the 429 the routes hand back)', () => {
     });
   });
 
-  it('lets an authenticated caller through an exhausted anonymous bucket', () => {
+  it('lets an authenticated caller through an exhausted anonymous bucket', async () => {
     const ip = `203.0.113.${crypto.randomUUID().slice(0, 2)}`;
     for (let i = 0; i < ANON_LIMIT_60S + 3; i++) {
-      apiRateLimit({ headers: headers({ 'x-forwarded-for': ip }) });
+      await apiRateLimit(req({ 'x-forwarded-for': ip }), null);
     }
-    const authed = apiRateLimit(
-      { headers: headers({ 'x-forwarded-for': ip, cookie: 'authjs.session-token=abc' }) },
+    const authed = await apiRateLimit(
+      req({ 'x-forwarded-for': ip, cookie: 'authjs.session-token=abc' }),
+      null,
     );
     expect(authed).toBeNull();
   });

@@ -1,6 +1,6 @@
 import { auth } from '@/lib/auth';
 import { describeErrorForLog } from '@/lib/auth/log';
-import { apiRateLimit } from '@/lib/ratelimit';
+import { apiRateLimit, rateLimitDb } from '@/lib/ratelimit';
 import { check } from '@/lib/quota/quotaService';
 
 /**
@@ -28,7 +28,7 @@ export async function GET(request: Request): Promise<Response> {
   // Ahead of the 401 gate on purpose: anonymous callers are exactly who this
   // brake exists for, and a limiter behind the auth check would only ever see
   // signed-in traffic.
-  const limited = apiRateLimit(request);
+  const limited = await apiRateLimit(request, await rateLimitDb());
   if (limited) return limited;
 
   // One id per request, generated before anything that can throw, so the
